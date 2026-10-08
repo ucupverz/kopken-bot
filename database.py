@@ -19,7 +19,6 @@ if _db_dir and not os.path.exists(_db_dir):
 def init_db():
     with get_conn() as conn:
         c = conn.cursor()
-        # Tabel users
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -31,7 +30,6 @@ def init_db():
                 banned INTEGER DEFAULT 0
             )
         """)
-        # Tabel VOC codes
         c.execute("""
             CREATE TABLE IF NOT EXISTS voc_codes (
                 code TEXT PRIMARY KEY,
@@ -44,7 +42,6 @@ def init_db():
                 active INTEGER DEFAULT 1
             )
         """)
-        # Tabel transactions (riwayat cek)
         c.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +97,6 @@ def add_quota(user_id, amount):
 
 
 def use_quota(user_id):
-    """Kurangi kuota 1. Return True kalau berhasil, False kalau kuota habis."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT quota FROM users WHERE user_id = ?", (user_id,))
@@ -130,12 +126,47 @@ def get_user_transactions(user_id, limit=10):
         return c.fetchall()
 
 
+def list_all_users(limit=50):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT user_id, username, first_name, quota, total_cek, created_at
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
+        return c.fetchall()
+
+
+def get_user_detail(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = c.fetchone()
+        if not user:
+            return None, []
+        c.execute("""
+            SELECT code, quota, used_at
+            FROM voc_codes
+            WHERE used_by = ?
+            ORDER BY used_at DESC
+        """, (user_id,))
+        vocs = c.fetchall()
+        return user, vocs
+
+
+def get_all_user_ids():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE banned = 0")
+        return [r["user_id"] for r in c.fetchall()]
+
+
 # ----------------------------------------------------------------------
 # VOC CODES
 # ----------------------------------------------------------------------
 
 def create_voc(code, quota, created_by):
-    """Buat kode VOC baru. Return True kalau berhasil, False kalau kode sudah ada."""
     now = int(time.time())
     with get_conn() as conn:
         c = conn.cursor()
@@ -147,7 +178,7 @@ def create_voc(code, quota, created_by):
             conn.commit()
             return True
         except sqlite3.IntegrityError:
-            return False  # kode sudah ada
+            return False
 
 
 def get_voc(code):
@@ -158,8 +189,6 @@ def get_voc(code):
 
 
 def use_voc(code, user_id):
-    """Pakai kode VOC: cek valid, kunci ke user_id, kasih kuota ke user.
-    Return (success, message, quota_amount)."""
     now = int(time.time())
     with get_conn() as conn:
         c = conn.cursor()
@@ -173,7 +202,6 @@ def use_voc(code, user_id):
             return False, "Kode sudah dipakai user lain.", 0
         if row["used_by"] == user_id:
             return False, "Kode ini sudah kamu pakai.", 0
-        # Kunci kode ke user dan kasih kuota
         c.execute("""
             UPDATE voc_codes SET used_by = ?, used_at = ?, active = 0 WHERE code = ?
         """, (user_id, now, code))
@@ -188,6 +216,21 @@ def list_voc_codes(limit=20):
         c = conn.cursor()
         c.execute("SELECT * FROM voc_codes ORDER BY created_at DESC LIMIT ?", (limit,))
         return c.fetchall()
+
+
+def get_voc_detail(code):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes WHERE code = ?", (code,))
+        voc = c.fetchone()
+        if not voc:
+            return None, None
+        if voc["used_by"]:
+            c.execute("SELECT user_id, username, first_name FROM users WHERE user_id = ?",
+                      (voc["used_by"],))
+            user = c.fetchone()
+            return voc, user
+        return voc, None
 
 
 def revoke_voc(code):
@@ -214,10 +257,3 @@ def get_stats():
             "active_voc": active_voc,
             "total_voc": total_voc
         }
-
-
-def get_all_user_ids():
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM users WHERE banned = 0")
-        return [r["user_id"] for r in c.fetchall()]
