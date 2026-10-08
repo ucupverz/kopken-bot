@@ -5,8 +5,17 @@ from contextlib import contextmanager
 
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
+# Auto-create folder kalau belum ada
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir and not os.path.exists(_db_dir):
+    try:
+        os.makedirs(_db_dir, exist_ok=True)
+        print(f"✅ Folder database dibuat: {_db_dir}")
+    except Exception as e:
+        print(f"⚠️ Gagal bikin folder {_db_dir}: {e}, fallback ke ./kopken.db")
+        DB_PATH = "kopken.db"
+
 def init_db():
-    """Inisialisasi tabel."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
@@ -45,6 +54,7 @@ def init_db():
             )
         """)
         conn.commit()
+    print(f"✅ Database initialized at: {DB_PATH}")
 
 @contextmanager
 def get_conn():
