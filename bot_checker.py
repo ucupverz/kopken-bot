@@ -122,6 +122,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"*Cara pakai:*\n"
         f"1. Kirim kode VOC untuk dapat kuota\n"
         f"2. Kirim nomor HP untuk cek\n\n"
+        f"*Catatan:* Kuota berkurang hanya kalau nomor FRESH (belum terdaftar).\n"
+        f"Nomor TERDAFTAR tidak mengurangi kuota.\n\n"
         f"Butuh kode VOC? Minta ke admin."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
@@ -134,8 +136,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Kirim kode VOC (contoh: `VOC-A1B2C3`) untuk dapat kuota\n"
         "2️⃣ Kirim nomor HP untuk cek\n\n"
         "*Output:*\n"
-        "• ✅ FRESH = belum terdaftar\n"
-        "• ⚠️ TERDAFTAR = sudah terdaftar\n\n"
+        "• ✅ FRESH = belum terdaftar (kuota -1)\n"
+        "• ⚠️ TERDAFTAR = sudah terdaftar (kuota tetap)\n\n"
         "*Commands:*\n"
         "/start — Menu utama\n"
         "/kuota — Cek kuota\n"
@@ -241,8 +243,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         status = d["status"]
         phone = d["phone"]
 
-        db.use_quota(user.id)
-        db.add_transaction(user.id, "cek", 1, "success", f"{status} {phone}")
+        # ============================================================
+        # KUOTA BERKURANG HANYA KALAU FRESH
+        # ============================================================
+        if status == "fresh":
+            db.use_quota(user.id)
+            db.add_transaction(user.id, "cek", 1, "success", f"FRESH {phone}")
+        else:
+            # TERDAFTAR → tidak potong kuota
+            db.add_transaction(user.id, "cek", 0, "success", f"{status} {phone}")
+
         new_quota = db.get_user(user.id)["quota"]
 
         if status == "fresh":
@@ -250,14 +260,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"✅ *FRESH* (belum terdaftar)\n\n"
                 f"📱 Nomor: `{phone}`\n"
                 f"📝 Status: Nomor FRESH! Belum terdaftar\n\n"
-                f"📊 Sisa kuota: *{new_quota}x*"
+                f"📊 Sisa kuota: *{new_quota}x* (berkurang 1)"
             )
         elif status == "registered":
             reply = (
                 f"⚠️ *TERDAFTAR*\n\n"
                 f"📱 Nomor: `{phone}`\n"
                 f"👤 Nama: {d.get('customer_name') or '-'}\n\n"
-                f"📊 Sisa kuota: *{new_quota}x*"
+                f"📊 Sisa kuota: *{new_quota}x* (tidak berkurang)"
             )
         else:
             reply = f"❓ Status tidak dikenal: `{status}`\n\n📊 Sisa kuota: *{new_quota}x*"
@@ -271,9 +281,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if u["quota"] < len(valid):
             await update.message.reply_text(
                 f"❌ Kuota tidak cukup.\n\n"
-                f"Butuh: {len(valid)}x\n"
+                f"Butuh: {len(valid)}x (max)\n"
                 f"Kuota kamu: {u['quota']}x\n\n"
-                f"Kurangi jumlah nomor atau minta kode VOC baru."
+                f"Catatan: kuota hanya berkurang untuk nomor FRESH.\n"
+                f"Nomor TERDAFTAR tidak mengurangi kuota."
             )
             return
 
@@ -291,21 +302,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             d = r["data"]
             if d["status"] == "fresh":
                 fresh_list.append(d["phone"])
+                # Fresh → potong kuota
+                db.use_quota(user.id)
+                db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
             elif d["status"] == "registered":
                 reg_list.append((d["phone"], d.get("customer_name") or "-"))
+                # Terdaftar → TIDAK potong kuota
+                db.add_transaction(user.id, "cek", 0, "success", f"REG {d['phone']}")
             else:
                 invalid_list.append(nomor)
-
-            db.use_quota(user.id)
-            db.add_transaction(user.id, "cek", 1, "success", f"{d['status']} {d['phone']}")
 
         new_quota = db.get_user(user.id)["quota"]
 
         summary = (
             f"📊 *Hasil Cek Massal*\n\n"
             f"Total: {len(valid)}\n"
-            f"✅ Fresh: {len(fresh_list)}\n"
-            f"⚠️ Terdaftar: {len(reg_list)}\n"
+            f"✅ Fresh: {len(fresh_list)} (kuota -{len(fresh_list)})\n"
+            f"⚠️ Terdaftar: {len(reg_list)} (gratis)\n"
             f"❌ Invalid: {len(invalid_list)}\n\n"
             f"📊 Sisa kuota: *{new_quota}x*"
         )
@@ -375,7 +388,6 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     args = ctx.args or []
 
-    # Case 1: /genvoc → acak, kuota default
     if not args:
         for _ in range(10):
             code = gen_voc_code()
@@ -390,7 +402,6 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Gagal generate kode, coba lagi.")
         return
 
-    # Case 2: /genvoc 5 → acak, kuota custom
     if len(args) == 1 and args[0].isdigit():
         quota = int(args[0])
         if quota < 1 or quota > 9999:
@@ -409,7 +420,6 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Gagal generate kode, coba lagi.")
         return
 
-    # Case 3: /genvoc KODE → custom, kuota default
     if len(args) == 1:
         custom_code = sanitize_voc_input(args[0])
         if not custom_code:
@@ -436,13 +446,11 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                f"❌ Kode `{custom_code}` sudah ada di database.\n"
-                f"Pakai kode lain atau generate kode acak.",
+                f"❌ Kode `{custom_code}` sudah ada di database.",
                 parse_mode=ParseMode.MARKDOWN
             )
         return
 
-    # Case 4: /genvoc KODE KUOTA → custom + kuota custom
     if len(args) >= 2:
         custom_code = sanitize_voc_input(args[0])
         if not custom_code:
@@ -475,8 +483,7 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                f"❌ Kode `{custom_code}` sudah ada di database.\n"
-                f"Pakai kode lain.",
+                f"❌ Kode `{custom_code}` sudah ada di database.",
                 parse_mode=ParseMode.MARKDOWN
             )
         return
@@ -590,7 +597,6 @@ async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 current += line + "\n"
         if current:
             chunks.append(current)
-
         for chunk in chunks:
             await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
     else:
@@ -717,12 +723,10 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # User commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("kuota", cmd_kuota))
 
-    # Admin commands
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("genvoc", cmd_genvoc))
     app.add_handler(CommandHandler("listvoc", cmd_listvoc))
@@ -733,7 +737,6 @@ def main():
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
 
-    # Message handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
