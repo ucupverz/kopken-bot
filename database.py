@@ -15,21 +15,36 @@ if _db_dir and not os.path.exists(_db_dir):
         print(f"⚠️ Gagal bikin folder {_db_dir}: {e}, fallback ke ./kopken.db")
         DB_PATH = "kopken.db"
 
+
 def init_db():
     with get_conn() as conn:
         c = conn.cursor()
+        # Tabel users
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
-                balance INTEGER DEFAULT 0,
-                total_topup INTEGER DEFAULT 0,
+                quota INTEGER DEFAULT 0,
                 total_cek INTEGER DEFAULT 0,
                 created_at INTEGER,
                 banned INTEGER DEFAULT 0
             )
         """)
+        # Tabel VOC codes
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS voc_codes (
+                code TEXT PRIMARY KEY,
+                quota INTEGER DEFAULT 3,
+                used INTEGER DEFAULT 0,
+                created_by INTEGER,
+                created_at INTEGER,
+                used_by INTEGER,
+                used_at INTEGER,
+                active INTEGER DEFAULT 1
+            )
+        """)
+        # Tabel transactions (riwayat cek)
         c.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,20 +56,9 @@ def init_db():
                 timestamp INTEGER
             )
         """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS pending_topups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount INTEGER,
-                photo_file_id TEXT,
-                status TEXT DEFAULT 'pending',
-                timestamp INTEGER,
-                approved_at INTEGER,
-                approved_by INTEGER
-            )
-        """)
         conn.commit()
     print(f"✅ Database initialized at: {DB_PATH}")
+
 
 @contextmanager
 def get_conn():
@@ -65,40 +69,48 @@ def get_conn():
     finally:
         conn.close()
 
+
+# ----------------------------------------------------------------------
+# USER
+# ----------------------------------------------------------------------
+
 def get_user(user_id):
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return c.fetchone()
 
+
 def create_user(user_id, username, first_name):
     now = int(time.time())
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
-            INSERT OR IGNORE INTO users (user_id, username, first_name, balance, created_at)
+            INSERT OR IGNORE INTO users (user_id, username, first_name, quota, created_at)
             VALUES (?, ?, ?, 0, ?)
         """, (user_id, username, first_name, now))
         conn.commit()
 
-def update_balance(user_id, delta):
+
+def add_quota(user_id, amount):
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
+        c.execute("UPDATE users SET quota = quota + ? WHERE user_id = ?", (amount, user_id))
         conn.commit()
 
-def add_topup(user_id, amount):
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET balance = balance + ?, total_topup = total_topup + ? WHERE user_id = ?",
-                  (amount, amount, user_id))
-        conn.commit()
 
-def add_cek_count(user_id):
+def use_quota(user_id):
+    """Kurangi kuota 1. Return True kalau berhasil, False kalau kuota habis."""
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("UPDATE users SET total_cek = total_cek + 1 WHERE user_id = ?", (user_id,))
+        c.execute("SELECT quota FROM users WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        if not row or row["quota"] <= 0:
+            return False
+        c.execute("UPDATE users SET quota = quota - 1, total_cek = total_cek + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
+        return True
+
 
 def add_transaction(user_id, ttype, amount, status, note=""):
     with get_conn() as conn:
@@ -109,41 +121,6 @@ def add_transaction(user_id, ttype, amount, status, note=""):
         """, (user_id, ttype, amount, status, note, int(time.time())))
         conn.commit()
 
-def create_pending_topup(user_id, amount, photo_file_id):
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO pending_topups (user_id, amount, photo_file_id, status, timestamp)
-            VALUES (?, ?, ?, 'pending', ?)
-        """, (user_id, amount, photo_file_id, int(time.time())))
-        conn.commit()
-        return c.lastrowid
-
-def get_pending_topups():
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM pending_topups WHERE status = 'pending' ORDER BY timestamp ASC")
-        return c.fetchall()
-
-def approve_topup(topup_id, admin_id):
-    now = int(time.time())
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM pending_topups WHERE id = ?", (topup_id,))
-        row = c.fetchone()
-        if not row or row["status"] != "pending":
-            return None
-        c.execute("UPDATE pending_topups SET status = 'approved', approved_at = ?, approved_by = ? WHERE id = ?",
-                  (now, admin_id, topup_id))
-        conn.commit()
-        return row
-
-def reject_topup(topup_id, admin_id, reason=""):
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("UPDATE pending_topups SET status = 'rejected', approved_at = ?, approved_by = ? WHERE id = ?",
-                  (int(time.time()), admin_id, topup_id))
-        conn.commit()
 
 def get_user_transactions(user_id, limit=10):
     with get_conn() as conn:
@@ -152,29 +129,95 @@ def get_user_transactions(user_id, limit=10):
                   (user_id, limit))
         return c.fetchall()
 
-def get_all_user_ids():
+
+# ----------------------------------------------------------------------
+# VOC CODES
+# ----------------------------------------------------------------------
+
+def create_voc(code, quota, created_by):
+    """Buat kode VOC baru. Return True kalau berhasil, False kalau kode sudah ada."""
+    now = int(time.time())
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id FROM users WHERE banned = 0")
-        return [r["user_id"] for r in c.fetchall()]
+        try:
+            c.execute("""
+                INSERT INTO voc_codes (code, quota, used, created_by, created_at, active)
+                VALUES (?, ?, 0, ?, ?, 1)
+            """, (code, quota, created_by, now))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False  # kode sudah ada
+
+
+def get_voc(code):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes WHERE code = ?", (code,))
+        return c.fetchone()
+
+
+def use_voc(code, user_id):
+    """Pakai kode VOC: cek valid, kunci ke user_id, kasih kuota ke user.
+    Return (success, message, quota_amount)."""
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes WHERE code = ?", (code,))
+        row = c.fetchone()
+        if not row:
+            return False, "Kode tidak ditemukan.", 0
+        if not row["active"]:
+            return False, "Kode sudah tidak aktif.", 0
+        if row["used_by"] is not None and row["used_by"] != user_id:
+            return False, "Kode sudah dipakai user lain.", 0
+        if row["used_by"] == user_id:
+            return False, "Kode ini sudah kamu pakai.", 0
+        # Kunci kode ke user dan kasih kuota
+        c.execute("""
+            UPDATE voc_codes SET used_by = ?, used_at = ?, active = 0 WHERE code = ?
+        """, (user_id, now, code))
+        c.execute("UPDATE users SET quota = quota + ? WHERE user_id = ?",
+                  (row["quota"], user_id))
+        conn.commit()
+        return True, f"Kode berhasil dipakai! Kuota +{row['quota']}x cek.", row["quota"]
+
+
+def list_voc_codes(limit=20):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes ORDER BY created_at DESC LIMIT ?", (limit,))
+        return c.fetchall()
+
+
+def revoke_voc(code):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE voc_codes SET active = 0 WHERE code = ?", (code,))
+        conn.commit()
+
 
 def get_stats():
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) as total FROM users")
         total = c.fetchone()["total"]
-        c.execute("SELECT COALESCE(SUM(balance), 0) as s FROM users")
-        total_balance = c.fetchone()["s"]
-        c.execute("SELECT COALESCE(SUM(amount), 0) as s FROM transactions WHERE type = 'topup' AND status = 'approved'")
-        total_topup = c.fetchone()["s"]
         c.execute("SELECT COUNT(*) as n FROM transactions WHERE type = 'cek'")
         total_cek = c.fetchone()["n"]
-        c.execute("SELECT COUNT(*) as n FROM pending_topups WHERE status = 'pending'")
-        pending = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) as n FROM voc_codes WHERE active = 1")
+        active_voc = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) as n FROM voc_codes")
+        total_voc = c.fetchone()["n"]
         return {
             "total_users": total,
-            "total_balance": total_balance,
-            "total_topup": total_topup,
             "total_cek": total_cek,
-            "pending": pending
+            "active_voc": active_voc,
+            "total_voc": total_voc
         }
+
+
+def get_all_user_ids():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE banned = 0")
+        return [r["user_id"] for r in c.fetchall()]
