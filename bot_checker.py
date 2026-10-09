@@ -3,6 +3,7 @@ import logging
 import random
 import string
 import re
+import time
 import httpx
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -41,10 +42,18 @@ def is_admin(user_id):
 
 
 def normalize_phone(text: str) -> str:
+    """Convert 08xxx → 628xxx untuk API call."""
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
     if t.startswith("0"):
         t = "62" + t[1:]
     return t
+
+
+def format_phone_display(phone_62: str) -> str:
+    """Convert 628xxx kembali ke 08xxx untuk display."""
+    if phone_62.startswith("62"):
+        return "0" + phone_62[2:]
+    return phone_62
 
 
 def is_valid_phone(text: str) -> bool:
@@ -134,10 +143,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📖 *Bantuan*\n\n"
         "*Cara pakai:*\n"
         "1️⃣ Kirim kode VOC (contoh: `VOC-A1B2C3`) untuk dapat kuota\n"
-        "2️⃣ Kirim nomor HP untuk cek\n\n"
+        "2️⃣ Kirim nomor HP untuk cek\n"
+        "3️⃣ Bisa kirim banyak nomor sekaligus (pisah baris) untuk bulk\n\n"
         "*Output:*\n"
-        "• ✅ FRESH = belum terdaftar (kuota -1)\n"
-        "• ⚠️ TERDAFTAR = sudah terdaftar (kuota tetap)\n\n"
+        "• ✅ TERDAFTAR = sudah terdaftar (kuota tetap)\n"
+        "• ❌ BELUM TERDAFTAR = belum terdaftar (kuota -1)\n\n"
         "*Commands:*\n"
         "/start — Menu utama\n"
         "/kuota — Cek kuota\n"
@@ -182,7 +192,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                "Kirim nomor HP yang mau dicek, contoh:\n`081234567890`",
+                "Kirim nomor HP yang mau dicek, contoh:\n`081234567890`\n\n"
+                "Bisa banyak nomor sekaligus (pisah baris).",
                 parse_mode=ParseMode.MARKDOWN
             )
         return
@@ -224,6 +235,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Cek nomor HP
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
+    # === SINGLE CHECK ===
     if len(lines) == 1 and is_valid_phone(lines[0]):
         if u["quota"] <= 0:
             await update.message.reply_text(
@@ -233,7 +245,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         msg = await update.message.reply_text("🔍 Mengecek...")
+        start_time = time.time()
         result = await nasky_cek_single(normalize_phone(lines[0]))
+        elapsed = time.time() - start_time
 
         if not result.get("success"):
             await msg.edit_text(f"❌ Error: {result.get('detail', 'Unknown')}")
@@ -241,41 +255,39 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         d = result["data"]
         status = d["status"]
-        phone = d["phone"]
+        phone_display = format_phone_display(d["phone"])
 
-        # ============================================================
-        # KUOTA BERKURANG HANYA KALAU FRESH
-        # ============================================================
         if status == "fresh":
             db.use_quota(user.id)
-            db.add_transaction(user.id, "cek", 1, "success", f"FRESH {phone}")
+            db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
         else:
-            # TERDAFTAR → tidak potong kuota
-            db.add_transaction(user.id, "cek", 0, "success", f"{status} {phone}")
+            db.add_transaction(user.id, "cek", 0, "success", f"{status} {d['phone']}")
 
         new_quota = db.get_user(user.id)["quota"]
 
         if status == "fresh":
             reply = (
-                f"✅ *FRESH* (belum terdaftar)\n\n"
-                f"📱 Nomor: `{phone}`\n"
-                f"📝 Status: Nomor FRESH! Belum terdaftar\n\n"
-                f"📊 Sisa kuota: *{new_quota}x* (berkurang 1)"
+                f"📊 HASIL PENGECEKAN NOMOR\n\n"
+                f"❌ BELUM TERDAFTAR [1]:\n"
+                f"{phone_display}\n\n"
+                f"⏱️ Waktu Pengecekan: {elapsed:.2f} detik\n"
+                f"💳 Sisa Kuota: {new_quota} Kredit"
             )
         elif status == "registered":
             reply = (
-                f"⚠️ *TERDAFTAR*\n\n"
-                f"📱 Nomor: `{phone}`\n"
-                f"👤 Nama: {d.get('customer_name') or '-'}\n\n"
-                f"📊 Sisa kuota: *{new_quota}x* (tidak berkurang)"
+                f"📊 HASIL PENGECEKAN NOMOR\n\n"
+                f"✅ TERDAFTAR [1]:\n"
+                f"{phone_display} | {d.get('customer_name') or '-'}\n\n"
+                f"⏱️ Waktu Pengecekan: {elapsed:.2f} detik\n"
+                f"💳 Sisa Kuota: {new_quota} Kredit"
             )
         else:
-            reply = f"❓ Status tidak dikenal: `{status}`\n\n📊 Sisa kuota: *{new_quota}x*"
+            reply = f"❓ Status tidak dikenal: `{status}`"
 
         await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Bulk check
+    # === BULK CHECK ===
     valid = [normalize_phone(l) for l in lines if is_valid_phone(l)]
     if valid:
         if u["quota"] < len(valid):
@@ -288,8 +300,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        msg = await update.message.reply_text(f"🔍 Mengecek {len(valid)} nomor...")
+        msg = await update.message.reply_text(
+            f"🔍 Mengecek {len(valid)} nomor...\nMohon tunggu."
+        )
 
+        start_time = time.time()
         fresh_list = []
         reg_list = []
         invalid_list = []
@@ -300,48 +315,74 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 invalid_list.append(nomor)
                 continue
             d = r["data"]
+            phone_display = format_phone_display(d["phone"])
             if d["status"] == "fresh":
-                fresh_list.append(d["phone"])
-                # Fresh → potong kuota
+                fresh_list.append(phone_display)
                 db.use_quota(user.id)
                 db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
             elif d["status"] == "registered":
-                reg_list.append((d["phone"], d.get("customer_name") or "-"))
-                # Terdaftar → TIDAK potong kuota
+                reg_list.append((phone_display, d.get("customer_name") or "-"))
                 db.add_transaction(user.id, "cek", 0, "success", f"REG {d['phone']}")
             else:
-                invalid_list.append(nomor)
+                invalid_list.append(phone_display)
 
+        elapsed = time.time() - start_time
         new_quota = db.get_user(user.id)["quota"]
 
-        summary = (
-            f"📊 *Hasil Cek Massal*\n\n"
-            f"Total: {len(valid)}\n"
-            f"✅ Fresh: {len(fresh_list)} (kuota -{len(fresh_list)})\n"
-            f"⚠️ Terdaftar: {len(reg_list)} (gratis)\n"
-            f"❌ Invalid: {len(invalid_list)}\n\n"
-            f"📊 Sisa kuota: *{new_quota}x*"
+        # === FORMAT OUTPUT KE TELEGRAM ===
+        out_lines = []
+        out_lines.append("📊 HASIL PENGECEKAN NOMOR")
+        out_lines.append("")
+
+        if reg_list:
+            out_lines.append(f"✅ TERDAFTAR [{len(reg_list)}]:")
+            for ph, nm in reg_list:
+                out_lines.append(f"{ph} | {nm}")
+            out_lines.append("")
+
+        if fresh_list:
+            out_lines.append(f"❌ BELUM TERDAFTAR [{len(fresh_list)}]:")
+            for ph in fresh_list:
+                out_lines.append(ph)
+            out_lines.append("")
+
+        if invalid_list:
+            out_lines.append(f"⚠️ INVALID [{len(invalid_list)}]:")
+            for ph in invalid_list:
+                out_lines.append(ph)
+            out_lines.append("")
+
+        out_lines.append(f"⏱️ Waktu Pengecekan: {elapsed:.2f} detik")
+        out_lines.append(f"💳 Sisa Kuota: {new_quota} Kredit")
+
+        text_output = "\n".join(out_lines)
+        await msg.edit_text(text_output)
+
+        # === FILE TXT ===
+        file_out = ["=" * 40, "HASIL PENGECEKAN NOMOR", "=" * 40, ""]
+        if reg_list:
+            file_out.append(f"TERDAFTAR [{len(reg_list)}]:")
+            for ph, nm in reg_list:
+                file_out.append(f"{ph} | {nm}")
+            file_out.append("")
+        if fresh_list:
+            file_out.append(f"BELUM TERDAFTAR [{len(fresh_list)}]:")
+            for ph in fresh_list:
+                file_out.append(ph)
+            file_out.append("")
+        if invalid_list:
+            file_out.append(f"INVALID [{len(invalid_list)}]:")
+            for ph in invalid_list:
+                file_out.append(ph)
+            file_out.append("")
+        file_out.append(f"Waktu Pengecekan: {elapsed:.2f} detik")
+        file_out.append(f"Sisa Kuota: {new_quota} Kredit")
+
+        file_bytes = "\n".join(file_out).encode("utf-8")
+        await update.message.reply_document(
+            document=file_bytes,
+            filename="hasil_cek.txt"
         )
-        await msg.edit_text(summary, parse_mode=ParseMode.MARKDOWN)
-
-        out = ["=" * 40, "HASIL CEK KOPI KENANGAN", "=" * 40]
-        out.append(f"Total: {len(valid)}")
-        out.append(f"Fresh: {len(fresh_list)}")
-        out.append(f"Terdaftar: {len(reg_list)}")
-        out.append(f"Invalid: {len(invalid_list)}")
-        out.append("")
-        out.append("--- FRESH (belum terdaftar) ---")
-        out.extend(fresh_list)
-        out.append("")
-        out.append("--- TERDAFTAR ---")
-        for ph, nm in reg_list:
-            out.append(f"{ph} | {nm}")
-        out.append("")
-        out.append("--- INVALID ---")
-        out.extend(invalid_list)
-
-        file_bytes = "\n".join(out).encode("utf-8")
-        await update.message.reply_document(document=file_bytes, filename="hasil_cek.txt")
         return
 
     await update.message.reply_text(
@@ -428,11 +469,7 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "*Aturan:*\n"
                 "• Hanya huruf, angka, `-`, `_`\n"
                 "• Tidak boleh spasi\n"
-                "• Panjang 3-50 karakter\n\n"
-                "*Contoh valid:*\n"
-                "`/genvoc ZEFAAN-VIP`\n"
-                "`/genvoc KOPKEN_JAYA`\n"
-                "`/genvoc VIP2024`",
+                "• Panjang 3-50 karakter",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
@@ -456,8 +493,7 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not custom_code:
             await update.message.reply_text(
                 "❌ Kode custom tidak valid.\n\n"
-                "Format: `/genvoc <KODE> <KUOTA>`\n"
-                "Contoh: `/genvoc ZEFAAN-VIP 10`",
+                "Format: `/genvoc <KODE> <KUOTA>`",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
@@ -609,8 +645,7 @@ async def cmd_userinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not ctx.args:
         await update.message.reply_text(
-            "Usage: `/userinfo <user_id>`\n\n"
-            "Contoh: `/userinfo 7222484897`",
+            "Usage: `/userinfo <user_id>`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -660,8 +695,7 @@ async def cmd_vocdetail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not ctx.args:
         await update.message.reply_text(
-            "Usage: `/vocdetail <kode>`\n\n"
-            "Contoh: `/vocdetail ZEFAAN-VIP`",
+            "Usage: `/vocdetail <kode>`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
