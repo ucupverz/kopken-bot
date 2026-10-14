@@ -22,6 +22,9 @@ from sfood_handlers import (
 )
 from sfood_tracker import tracker_worker
 
+# Tarif ShopeeFood
+from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
+
 # ----------------------------------------------------------------------
 # CONFIG
 # ----------------------------------------------------------------------
@@ -92,7 +95,7 @@ def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
         ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
-        ["❓ Bantuan"]
+        ["📊 Tarif ShopeeFood", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 
@@ -100,7 +103,8 @@ def admin_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
         ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
-        ["🔧 Admin Panel", "❓ Bantuan"]
+        ["📊 Tarif ShopeeFood", "🔧 Admin Panel"],
+        ["❓ Bantuan"]
     ], resize_keyboard=True)
 
 
@@ -138,6 +142,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"*Fitur:*\n"
         f"• ☕ Cek Nomor Kopi Kenangan\n"
         f"• 🍔 ShopeeFood Tracker\n"
+        f"• 📊 Tarif ShopeeFood\n"
         f"• 🔑 Redeem kode VOC\n\n"
         f"Ketik `/help` untuk bantuan lengkap."
     )
@@ -153,12 +158,17 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*🍔 ShopeeFood Tracker:*\n"
         "• `/sfood` — Menu tracker\n"
         "• Kirim link tracker + label → bot lacak otomatis\n\n"
+        "*📊 Tarif ShopeeFood:*\n"
+        "• `/tarif <angka>` — Input biaya layanan\n"
+        "• `/tarif_cek` — Cek status tarif sekarang\n"
+        "• `/tarif_stats` — Statistik\n\n"
         "*🔑 Kode VOC:*\n"
         "• Kirim kode VOC untuk dapat kuota cek\n\n"
         "*Commands:*\n"
         "/start — Menu utama\n"
         "/kuota — Cek kuota\n"
         "/sfood — ShopeeFood Tracker\n"
+        "/tarif — Input tarif\n"
         "/help — Bantuan ini"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
@@ -252,7 +262,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "🔙 Menu Utama":
-        # Kembali ke menu utama
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
         await update.message.reply_text(
             f"🏠 <b>Menu Utama</b>\n\n"
@@ -260,6 +269,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Pilih menu di bawah:",
             parse_mode=ParseMode.HTML,
             reply_markup=kb
+        )
+        return
+
+    if text == "📊 Tarif ShopeeFood":
+        await update.message.reply_text(
+            "📊 <b>Tarif ShopeeFood</b>\n\n"
+            "<b>Command:</b>\n"
+            "<code>/tarif &lt;angka&gt;</code> — Input biaya layanan\n"
+            "<code>/tarif_cek</code> — Cek status tarif sekarang\n"
+            "<code>/tarif_stats</code> — Statistik lengkap\n\n"
+            "<b>Contoh input:</b>\n"
+            "<code>/tarif 1000</code>\n"
+            "<code>/tarif 5000</code>",
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -807,7 +830,6 @@ def main():
     db.init_db()
 
     async def post_init(app):
-        # Start ShopeeFood tracker worker
         asyncio.create_task(tracker_worker(app.bot))
         print("[SFOOD] Tracker worker started")
 
@@ -822,6 +844,11 @@ def main():
     app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
     app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
     app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
+
+    # Tarif
+    app.add_handler(CommandHandler("tarif", cmd_tarif))
+    app.add_handler(CommandHandler("tarif_cek", cmd_tarif_cek))
+    app.add_handler(CommandHandler("tarif_stats", cmd_tarif_stats))
 
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("genvoc", cmd_genvoc))

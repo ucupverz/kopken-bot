@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import time
+import datetime
 from contextlib import contextmanager
 
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
@@ -81,6 +82,16 @@ def init_db():
                 order_id TEXT,
                 status_code INTEGER,
                 status_text TEXT,
+                timestamp INTEGER
+            )
+        """)
+        # Tabel Tarif ShopeeFood
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tarif_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                biaya INTEGER,
+                jam INTEGER,
                 timestamp INTEGER
             )
         """)
@@ -376,3 +387,85 @@ def sfood_stop_all_user(user_id):
         c.execute("UPDATE sfood_orders SET active = 0 WHERE user_id = ? AND active = 1", (user_id,))
         conn.commit()
         return c.rowcount
+
+
+# ----------------------------------------------------------------------
+# TARIF SHOPEEFOOD
+# ----------------------------------------------------------------------
+
+def tarif_add(user_id, biaya):
+    """Simpan input tarif. jam diambil dari timestamp sekarang."""
+    now_ts = int(time.time())
+    jam = datetime.datetime.now().hour
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO tarif_logs (user_id, biaya, jam, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, biaya, jam, now_ts))
+        conn.commit()
+
+
+def tarif_get_latest(user_id=None):
+    """Ambil input tarif terakhir. Kalau user_id None, ambil global."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        if user_id:
+            c.execute("SELECT * FROM tarif_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
+        else:
+            c.execute("SELECT * FROM tarif_logs ORDER BY timestamp DESC LIMIT 1")
+        return c.fetchone()
+
+
+def tarif_get_avg_for_hour(jam):
+    """Rata-rata tarif untuk jam tertentu. Return (avg, count)."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT AVG(biaya) as avg_b, COUNT(*) as cnt FROM tarif_logs WHERE jam = ?", (jam,))
+        row = c.fetchone()
+        if not row or row["cnt"] == 0 or row["avg_b"] is None:
+            return None, 0
+        return int(row["avg_b"]), row["cnt"]
+
+
+def tarif_get_stats():
+    """Statistik lengkap."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) as total, MIN(biaya) as min_b, MAX(biaya) as max_b, AVG(biaya) as avg_b FROM tarif_logs")
+        row = c.fetchone()
+        total = row["total"] or 0
+        min_b = row["min_b"]
+        max_b = row["max_b"]
+        avg_b = int(row["avg_b"]) if row["avg_b"] else 0
+
+        # Jam termurah
+        c.execute("""
+            SELECT jam, AVG(biaya) as avg_b, COUNT(*) as cnt
+            FROM tarif_logs
+            GROUP BY jam
+            HAVING cnt >= 1
+            ORDER BY avg_b ASC
+            LIMIT 3
+        """)
+        cheapest_hours = c.fetchall()
+
+        # Jam termahal
+        c.execute("""
+            SELECT jam, AVG(biaya) as avg_b, COUNT(*) as cnt
+            FROM tarif_logs
+            GROUP BY jam
+            HAVING cnt >= 1
+            ORDER BY avg_b DESC
+            LIMIT 3
+        """)
+        expensive_hours = c.fetchall()
+
+        return {
+            "total": total,
+            "min": min_b,
+            "max": max_b,
+            "avg": avg_b,
+            "cheapest": cheapest_hours,
+            "expensive": expensive_hours,
+        }
