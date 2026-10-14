@@ -1,9 +1,10 @@
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 import database as db
 from sfood_client import parse_tracker_url, fetch_tracking, parse_tracking
+from map_generator import generate_map_driver_resto, generate_map_single
 
 
 def sfood_keyboard():
@@ -144,6 +145,30 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         last_driver_phone=parsed["driver_phone"],
     )
 
+    # === KIRIM MAP KALAU KOORDINAT TERSEDIA ===
+    driver_lat = parsed.get("driver_lat")
+    driver_lng = parsed.get("driver_lng")
+    store_lat = parsed.get("store_lat")
+    store_lng = parsed.get("store_lng")
+
+    bio = None
+    if driver_lat and store_lat:
+        bio = generate_map_driver_resto(driver_lat, driver_lng, store_lat, store_lng)
+    elif driver_lat:
+        bio = generate_map_single(driver_lat, driver_lng)
+    elif store_lat:
+        bio = generate_map_single(store_lat, store_lng)
+
+    if bio:
+        try:
+            await update.message.reply_photo(
+                photo=InputFile(bio, filename="map.png"),
+                caption=f"🗺️ {parsed['store_name']}"
+            )
+        except Exception as e:
+            print(f"[SFOOD] ❌ Map error: {e}")
+
+    # === KIRIM TEKS KONFIRMASI ===
     await msg.edit_text(
         f"✅ <b>Order dilacak!</b>\n\n"
         f"📦 Label: {label}\n"
