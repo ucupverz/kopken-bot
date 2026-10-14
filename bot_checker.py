@@ -22,7 +22,12 @@ from sfood_handlers import (
 )
 from sfood_tracker import tracker_worker
 
-# Tarif ShopeeFood
+# ShopeeFood Admin
+from sfood_admin_handlers import (
+    cmd_sfood_users, cmd_sfood_leaderboard, cmd_sfood_userinfo
+)
+
+# Tarif
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
 
 # ----------------------------------------------------------------------
@@ -492,7 +497,11 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"`/stats` — Statistik\n\n"
         f"*Kelola:*\n"
         f"`/revoke <kode>` — Nonaktifkan kode\n"
-        f"`/addkuota <user_id> <n>` — Tambah kuota user"
+        f"`/addkuota <user_id> <n>` — Tambah kuota user\n\n"
+        f"*ShopeeFood Admin:*\n"
+        f"`/sfood_users` — List semua user\n"
+        f"`/sfood_leaderboard` — Leaderboard\n"
+        f"`/sfood_userinfo <id>` — Detail user"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -830,6 +839,9 @@ def main():
     db.init_db()
 
     async def post_init(app):
+        # Set admin_ids ke bot_data biar bisa diakses handler
+        app.bot_data["admin_ids"] = ADMIN_IDS
+        # Start ShopeeFood tracker worker
         asyncio.create_task(tracker_worker(app.bot))
         print("[SFOOD] Tracker worker started")
 
@@ -844,6 +856,11 @@ def main():
     app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
     app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
     app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
+
+    # ShopeeFood Admin
+    app.add_handler(CommandHandler("sfood_users", cmd_sfood_users))
+    app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
+    app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
 
     # Tarif
     app.add_handler(CommandHandler("tarif", cmd_tarif))

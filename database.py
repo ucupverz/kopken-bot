@@ -20,7 +20,6 @@ if _db_dir and not os.path.exists(_db_dir):
 def init_db():
     with get_conn() as conn:
         c = conn.cursor()
-        # Tabel users
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -32,7 +31,6 @@ def init_db():
                 banned INTEGER DEFAULT 0
             )
         """)
-        # Tabel VOC codes
         c.execute("""
             CREATE TABLE IF NOT EXISTS voc_codes (
                 code TEXT PRIMARY KEY,
@@ -45,7 +43,6 @@ def init_db():
                 active INTEGER DEFAULT 1
             )
         """)
-        # Tabel transactions
         c.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +54,6 @@ def init_db():
                 timestamp INTEGER
             )
         """)
-        # Tabel ShopeeFood orders
         c.execute("""
             CREATE TABLE IF NOT EXISTS sfood_orders (
                 order_id TEXT PRIMARY KEY,
@@ -75,7 +71,6 @@ def init_db():
                 updated_at INTEGER
             )
         """)
-        # Tabel ShopeeFood status log
         c.execute("""
             CREATE TABLE IF NOT EXISTS sfood_status_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,7 +80,6 @@ def init_db():
                 timestamp INTEGER
             )
         """)
-        # Tabel Tarif ShopeeFood
         c.execute("""
             CREATE TABLE IF NOT EXISTS tarif_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,11 +384,88 @@ def sfood_stop_all_user(user_id):
 
 
 # ----------------------------------------------------------------------
+# SHOPEEFOOD ADMIN / LEADERBOARD
+# ----------------------------------------------------------------------
+
+def sfood_list_all_users():
+    """List semua user yang pernah pakai ShopeeFood Tracker."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                u.user_id,
+                u.username,
+                u.first_name,
+                COUNT(DISTINCT so.order_id) as total_orders,
+                COUNT(DISTINCT CASE WHEN so.active = 1 THEN so.order_id END) as active_orders,
+                MAX(so.created_at) as last_order_at
+            FROM users u
+            INNER JOIN sfood_orders so ON so.user_id = u.user_id
+            GROUP BY u.user_id
+            ORDER BY total_orders DESC, last_order_at DESC
+        """)
+        return c.fetchall()
+
+
+def sfood_get_user_history(user_id, limit=20):
+    """Ambil history order ShopeeFood user."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM sfood_orders
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (user_id, limit))
+        return c.fetchall()
+
+
+def sfood_get_leaderboard(limit=20):
+    """Leaderboard user ShopeeFood berdasarkan total order."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                u.user_id,
+                u.username,
+                u.first_name,
+                COUNT(DISTINCT so.order_id) as total_orders,
+                SUM(CASE WHEN so.active = 1 THEN 1 ELSE 0 END) as active_count,
+                MAX(so.created_at) as last_order_at
+            FROM users u
+            INNER JOIN sfood_orders so ON so.user_id = u.user_id
+            GROUP BY u.user_id
+            ORDER BY total_orders DESC
+            LIMIT ?
+        """, (limit,))
+        return c.fetchall()
+
+
+def sfood_get_global_stats():
+    """Statistik global ShopeeFood Tracker."""
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(DISTINCT user_id) as total FROM sfood_orders")
+        total_users = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as total FROM sfood_orders")
+        total_orders = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as total FROM sfood_orders WHERE active = 1")
+        active_orders = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as total FROM sfood_orders WHERE active = 0")
+        completed_orders = c.fetchone()["total"]
+        return {
+            "total_users": total_users,
+            "total_orders": total_orders,
+            "active_orders": active_orders,
+            "completed_orders": completed_orders,
+        }
+
+
+# ----------------------------------------------------------------------
 # TARIF SHOPEEFOOD
 # ----------------------------------------------------------------------
 
 def tarif_add(user_id, biaya):
-    """Simpan input tarif. jam diambil dari timestamp sekarang."""
     now_ts = int(time.time())
     jam = datetime.datetime.now().hour
     with get_conn() as conn:
@@ -407,7 +478,6 @@ def tarif_add(user_id, biaya):
 
 
 def tarif_get_latest(user_id=None):
-    """Ambil input tarif terakhir. Kalau user_id None, ambil global."""
     with get_conn() as conn:
         c = conn.cursor()
         if user_id:
@@ -418,7 +488,6 @@ def tarif_get_latest(user_id=None):
 
 
 def tarif_get_avg_for_hour(jam):
-    """Rata-rata tarif untuk jam tertentu. Return (avg, count)."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT AVG(biaya) as avg_b, COUNT(*) as cnt FROM tarif_logs WHERE jam = ?", (jam,))
@@ -429,7 +498,6 @@ def tarif_get_avg_for_hour(jam):
 
 
 def tarif_get_stats():
-    """Statistik lengkap."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) as total, MIN(biaya) as min_b, MAX(biaya) as max_b, AVG(biaya) as avg_b FROM tarif_logs")
@@ -439,7 +507,6 @@ def tarif_get_stats():
         max_b = row["max_b"]
         avg_b = int(row["avg_b"]) if row["avg_b"] else 0
 
-        # Jam termurah
         c.execute("""
             SELECT jam, AVG(biaya) as avg_b, COUNT(*) as cnt
             FROM tarif_logs
@@ -450,7 +517,6 @@ def tarif_get_stats():
         """)
         cheapest_hours = c.fetchall()
 
-        # Jam termahal
         c.execute("""
             SELECT jam, AVG(biaya) as avg_b, COUNT(*) as cnt
             FROM tarif_logs
