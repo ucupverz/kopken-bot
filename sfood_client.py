@@ -11,7 +11,6 @@ WIB = timezone(timedelta(hours=7))
 
 # Mapping status kode → deskripsi
 STATUS_MAP = {
-    # Order phase
     100: "Order baru masuk",
     110: "Menunggu konfirmasi restoran",
     200: "Restoran konfirmasi pesanan",
@@ -57,6 +56,21 @@ def ts_to_str(ts):
         return dt.strftime("%d/%m %H:%M")
     except Exception:
         return "-"
+
+
+def _pick_coord(*candidates):
+    """Ambil koordinat pertama yang bukan 0,0 dari list candidate."""
+    for c in candidates:
+        if not c or not isinstance(c, dict):
+            continue
+        lat = c.get("precise_latitude") or c.get("latitude") or 0
+        lng = c.get("precise_longitude") or c.get("longitude") or 0
+        try:
+            if float(lat) != 0 and float(lng) != 0:
+                return float(lat), float(lng)
+        except Exception:
+            pass
+    return 0, 0
 
 
 async def fetch_tracking(order_id: str, code: str):
@@ -150,23 +164,27 @@ def parse_tracking(data: dict):
     complete_time = deliv_order.get("complete_time", "0")
 
     # Flags
-    is_arriving = (enroute_status == 200 or status_code == 440 or status_code == 445)
+    is_arriving = (enroute_status == 200 or status_code in (440, 445))
     is_done = (complete_time and complete_time != "0") or status_code in (600, 900)
     is_cancelled = status_code == 999
 
     # === EXTRACT KOORDINAT ===
+    # Driver: ambil dari geo_tracking, prioritas: complete → pickup → arrive → accept
     geo = deliv_order.get("geo_tracking") or {}
-    driver_geo = geo.get("complete_geo") or geo.get("pickup_geo") or geo.get("arrive_geo") or {}
-    driver_lat = driver_geo.get("precise_latitude") or driver_geo.get("latitude") or 0
-    driver_lng = driver_geo.get("precise_longitude") or driver_geo.get("longitude") or 0
+    driver_lat, driver_lng = _pick_coord(
+        geo.get("complete_geo"),
+        geo.get("pickup_geo"),
+        geo.get("arrive_geo"),
+        geo.get("accept_geo"),
+    )
 
+    # Restoran
     store_loc = store.get("location") or {}
-    store_lat = store_loc.get("precise_latitude") or store_loc.get("latitude") or 0
-    store_lng = store_loc.get("precise_longitude") or store_loc.get("longitude") or 0
+    store_lat, store_lng = _pick_coord(store_loc)
 
+    # Alamat pengiriman
     deliv_loc = order.get("delivery_address", {}).get("location") or {}
-    deliv_lat = deliv_loc.get("precise_latitude") or deliv_loc.get("latitude") or 0
-    deliv_lng = deliv_loc.get("precise_longitude") or deliv_loc.get("longitude") or 0
+    deliv_lat, deliv_lng = _pick_coord(deliv_loc)
 
     return {
         "status_code": status_code,

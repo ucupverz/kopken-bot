@@ -19,6 +19,34 @@ def fmt_gmaps_link(lat, lng):
         return None
 
 
+def build_maps_section(data):
+    """Bangun section peta dari data koordinat."""
+    links = []
+
+    # 1. Driver (posisi terakhir diketahui)
+    if data.get("driver_lat") and data.get("driver_lng"):
+        link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
+        if link:
+            links.append(f"   🚗 <a href='{link}'>Posisi Driver</a>")
+
+    # 2. Restoran
+    if data.get("store_lat") and data.get("store_lng"):
+        link = fmt_gmaps_link(data["store_lat"], data["store_lng"])
+        if link:
+            links.append(f"   🏪 <a href='{link}'>Lokasi Restoran</a>")
+
+    # 3. Alamat pengiriman
+    if data.get("deliv_lat") and data.get("deliv_lng"):
+        link = fmt_gmaps_link(data["deliv_lat"], data["deliv_lng"])
+        if link:
+            links.append(f"   🏠 <a href='{link}'>Alamat Pengiriman</a>")
+
+    if not links:
+        return []
+
+    return ["", "🗺️ <b>Peta:</b>"] + links
+
+
 def fmt_status_update(order, data):
     label = order["label"]
     lines = [
@@ -38,18 +66,7 @@ def fmt_status_update(order, data):
         if data.get('driver_plate') and data['driver_plate'] != "-":
             lines.append(f"🏍️ Plat: {data['driver_plate']}")
 
-    # Map link — prioritas: driver → restoran → alamat
-    maps_link = None
-    if data.get("driver_lat") and data.get("driver_lng"):
-        maps_link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
-    elif data.get("store_lat") and data.get("store_lng"):
-        maps_link = fmt_gmaps_link(data["store_lat"], data["store_lng"])
-    elif data.get("deliv_lat") and data.get("deliv_lng"):
-        maps_link = fmt_gmaps_link(data["deliv_lat"], data["deliv_lng"])
-
-    if maps_link:
-        lines.append("")
-        lines.append(f"🗺️ <a href='{maps_link}'>Lihat di Google Maps</a>")
+    lines.extend(build_maps_section(data))
 
     return "\n".join(lines)
 
@@ -70,11 +87,7 @@ def fmt_arriving(order, data):
     if data.get('driver_plate') and data['driver_plate'] != "-":
         lines.append(f"🏍️ {data['driver_plate']}")
 
-    if data.get("driver_lat") and data.get("driver_lng"):
-        maps_link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
-        if maps_link:
-            lines.append("")
-            lines.append(f"🗺️ <a href='{maps_link}'>Lihat Posisi Driver</a>")
+    lines.extend(build_maps_section(data))
 
     lines.append("")
     lines.append("Segera siap-siap terima pesananmu!")
@@ -83,12 +96,13 @@ def fmt_arriving(order, data):
 
 def fmt_done(order, data):
     label = order["label"]
+    total_str = f"Rp {data['total_rp']:,}".replace(",", ".")
     return (
         f"✅ <b>PESANAN SELESAI</b>\n\n"
         f"📦 {label}\n"
         f"🏪 {data['store_name']}\n"
         f"📝 {data['item_count']} item\n"
-        f"💰 Rp {data['total_rp']:,}".replace(",", ".") + "\n\n"
+        f"💰 {total_str}\n\n"
         f"Tracking dihentikan otomatis."
     )
 
