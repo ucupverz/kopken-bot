@@ -196,7 +196,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_sfood_message(update, ctx)
         return
 
-    # Tombol menu
+    # Tombol menu utama
     if text == "☕ Cek Nomor":
         if u["quota"] <= 0:
             await update.message.reply_text(
@@ -225,6 +225,42 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if text == "🍔 ShopeeFood":
         await cmd_sfood(update, ctx)
+        return
+
+    # === TOMBOL SHOPEEFOOD MENU ===
+    if text == "🍔 Tambah Order":
+        await update.message.reply_text(
+            "Kirim link tracker ShopeeFood + label opsional.\n\n"
+            "Contoh:\n"
+            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Corndog siang</code>\n\n"
+            "Atau tanpa label:\n"
+            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if text == "📋 List Order":
+        await cmd_sfood_list(update, ctx)
+        return
+
+    if text == "❌ Stop Order":
+        await update.message.reply_text(
+            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\n"
+            "Atau stop semua: /sfood_stopall",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if text == "🔙 Menu Utama":
+        # Kembali ke menu utama
+        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+        await update.message.reply_text(
+            f"🏠 <b>Menu Utama</b>\n\n"
+            f"📊 Kuota: <b>{u['quota']}x cek</b>\n\n"
+            f"Pilih menu di bawah:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
         return
 
     if text == "❓ Bantuan":
