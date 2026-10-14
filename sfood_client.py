@@ -26,7 +26,10 @@ STATUS_MAP = {
     440: "Driver menuju alamatmu",
     445: "Driver hampir tiba",
     450: "Driver tiba di lokasi",
-    500: "Pesanan diterima",
+    460: "Pesanan sampai",
+    470: "Pesanan sampai",
+    500: "Pesanan sampai",
+    550: "Pesanan sampai",
     600: "Pesanan selesai",
     900: "Pesanan selesai",
     999: "Pesanan dibatalkan",
@@ -115,11 +118,13 @@ def parse_tracking(data: dict):
     # Fallback: tebak dari delivery_status / enroute_status
     if not status_text:
         if enroute_status >= 300:
-            status_text = "Driver tiba di lokasi"
+            status_text = "Pesanan sampai"
         elif enroute_status >= 200:
             status_text = "Driver menuju alamatmu"
         elif enroute_status >= 100:
             status_text = "Driver dalam perjalanan"
+        elif delivery_status >= 5:
+            status_text = "Pesanan sampai"
         elif delivery_status >= 4:
             status_text = "Driver mengambil pesanan"
         elif delivery_status >= 3:
@@ -163,13 +168,33 @@ def parse_tracking(data: dict):
     # Complete time
     complete_time = deliv_order.get("complete_time", "0")
 
-    # Flags
+    # Extract bukti pengiriman (foto dari driver)
+    complete_certs = deliv_order.get("complete_certs") or []
+    pickup_certs = deliv_order.get("pickup_certs") or []
+    proof_urls = []
+
+    # Ambil foto dari complete_certs (bukti antar)
+    for cert in complete_certs:
+        if isinstance(cert, dict) and cert.get("image_url"):
+            proof_urls.append(cert["image_url"])
+
+    # Kalau complete_certs kosong, ambil pickup_certs (foto ambil pesanan)
+    if not proof_urls:
+        for cert in pickup_certs:
+            if isinstance(cert, dict) and cert.get("image_url"):
+                proof_urls.append(cert["image_url"])
+
+    # Flags — deteksi lebih agresif
     is_arriving = (enroute_status == 200 or status_code in (440, 445))
-    is_done = (complete_time and complete_time != "0") or status_code in (600, 900)
+    is_done = (
+        (complete_time and str(complete_time) != "0") or
+        status_code in (500, 550, 600, 900) or
+        delivery_status >= 5 or
+        enroute_status >= 300
+    )
     is_cancelled = status_code == 999
 
     # === EXTRACT KOORDINAT ===
-    # Driver: ambil dari geo_tracking, prioritas: complete → pickup → arrive → accept
     geo = deliv_order.get("geo_tracking") or {}
     driver_lat, driver_lng = _pick_coord(
         geo.get("complete_geo"),
@@ -178,11 +203,9 @@ def parse_tracking(data: dict):
         geo.get("accept_geo"),
     )
 
-    # Restoran
     store_loc = store.get("location") or {}
     store_lat, store_lng = _pick_coord(store_loc)
 
-    # Alamat pengiriman
     deliv_loc = order.get("delivery_address", {}).get("location") or {}
     deliv_lat, deliv_lng = _pick_coord(deliv_loc)
 
@@ -202,6 +225,7 @@ def parse_tracking(data: dict):
         "is_arriving": is_arriving,
         "is_done": is_done,
         "is_cancelled": is_cancelled,
+        "proof_urls": proof_urls,
         # Koordinat
         "driver_lat": driver_lat,
         "driver_lng": driver_lng,

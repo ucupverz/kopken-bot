@@ -98,14 +98,17 @@ def fmt_arriving(order, data):
 def fmt_done(order, data):
     label = order["label"]
     total_str = f"Rp {data['total_rp']:,}".replace(",", ".")
-    return (
+    text = (
         f"✅ <b>PESANAN SELESAI</b>\n\n"
         f"📦 {label}\n"
         f"🏪 {data['store_name']}\n"
         f"📝 {data['item_count']} item\n"
-        f"💰 {total_str}\n\n"
-        f"Tracking dihentikan otomatis."
+        f"💰 {total_str}\n"
     )
+    if data.get("proof_urls"):
+        text += f"\n📸 Bukti pengiriman: {len(data['proof_urls'])} foto."
+    text += "\n\nTracking dihentikan otomatis."
+    return text
 
 
 def fmt_cancelled(order, data):
@@ -125,7 +128,6 @@ async def send_map(bot, user_id, parsed, caption=""):
     store_lat = parsed.get("store_lat")
     store_lng = parsed.get("store_lng")
 
-    # Skip kalau tidak ada koordinat
     if not (driver_lat or store_lat):
         return
 
@@ -133,13 +135,10 @@ async def send_map(bot, user_id, parsed, caption=""):
         bio = None
 
         if driver_lat and store_lat:
-            # 2 pin: driver + resto
             bio = generate_map_driver_resto(driver_lat, driver_lng, store_lat, store_lng)
         elif driver_lat:
-            # 1 pin: driver saja
             bio = generate_map_single(driver_lat, driver_lng)
         elif store_lat:
-            # 1 pin: restoran saja
             bio = generate_map_single(store_lat, store_lng)
 
         if bio:
@@ -150,6 +149,27 @@ async def send_map(bot, user_id, parsed, caption=""):
             )
     except Exception as e:
         print(f"[SFOOD] ❌ Map error: {e}")
+
+
+async def send_proof_images(bot, user_id, parsed, label):
+    """Kirim bukti pengiriman (foto) ke user."""
+    proof_urls = parsed.get("proof_urls") or []
+    if not proof_urls:
+        return
+
+    # Max 3 foto biar tidak spam
+    for i, url in enumerate(proof_urls[:3], 1):
+        try:
+            caption = f"📸 <b>Bukti Pengiriman #{i}</b>\n📦 {label}"
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=url,
+                caption=caption,
+                parse_mode="HTML"
+            )
+            print(f"[SFOOD] 📸 Bukti #{i} terkirim ke user {user_id}")
+        except Exception as e:
+            print(f"[SFOOD] ❌ Gagal kirim bukti #{i}: {e}")
 
 
 async def check_one_order(bot, order):
@@ -171,6 +191,10 @@ async def check_one_order(bot, order):
 
     # === SELESAI ===
     if parsed["is_done"]:
+        # Kirim foto bukti pengiriman dulu
+        await send_proof_images(bot, user_id, parsed, order["label"])
+
+        # Kirim notif teks
         text = fmt_done(order, parsed)
         try:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
@@ -194,11 +218,9 @@ async def check_one_order(bot, order):
     # === HAMPIR TIBA ===
     if parsed["is_arriving"]:
         if order.get("last_flag") != "arriving":
-            # Kirim map dulu
             await send_map(bot, user_id, parsed,
                            caption=f"⚡ Driver hampir tiba: {parsed.get('driver_name') or '-'}")
 
-            # Kirim teks notif
             text = fmt_arriving(order, parsed)
             try:
                 await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
@@ -212,7 +234,7 @@ async def check_one_order(bot, order):
 
     # === PERUBAHAN STATUS ===
     if current_status != last_status:
-        # Kirim map dulu (kalau ada koordinat baru)
+        # Kirim map dulu
         await send_map(bot, user_id, parsed,
                        caption=f"🗺️ Update: {parsed.get('status_text') or '-'}")
 
