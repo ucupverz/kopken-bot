@@ -5,37 +5,86 @@ from sfood_client import fetch_tracking, parse_tracking
 from sfood_config import SFOOD_POLL_INTERVAL
 
 
+def fmt_gmaps_link(lat, lng):
+    """Bikin link Google Maps dari koordinat."""
+    if not lat or not lng:
+        return None
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+        if lat_f == 0 and lng_f == 0:
+            return None
+        return f"https://www.google.com/maps?q={lat_f},{lng_f}"
+    except Exception:
+        return None
+
+
 def fmt_status_update(order, data):
     label = order["label"]
-    return (
-        f"🍔 *Update ShopeeFood*\n"
-        f"📦 {label}\n\n"
-        f"🚗 Status: *{data['status_text']}*\n"
-        f"⏱️ ETA: {data['eta_text']}\n"
-        f"🏪 {data['store_name']}\n\n"
-        f"🧑 Driver: {data['driver_name']}\n"
-        f"📞 HP: `{data['driver_phone']}`\n"
-        f"🏍️ Plat: {data['driver_plate']}"
-    )
+    lines = [
+        f"🍔 <b>Update ShopeeFood</b>",
+        f"📦 {label}",
+        "",
+        f"🚗 Status: <b>{data['status_text']}</b>",
+        f"⏱️ ETA: {data['eta_text']}",
+        f"🏪 {data['store_name']}",
+    ]
+
+    if data.get('driver_name') and data['driver_name'] != "-":
+        lines.append("")
+        lines.append(f"🧑 Driver: {data['driver_name']}")
+        if data.get('driver_phone') and data['driver_phone'] != "-":
+            lines.append(f"📞 HP: <code>{data['driver_phone']}</code>")
+        if data.get('driver_plate') and data['driver_plate'] != "-":
+            lines.append(f"🏍️ Plat: {data['driver_plate']}")
+
+    # Map link — prioritas: driver → restoran → alamat
+    maps_link = None
+    if data.get("driver_lat") and data.get("driver_lng"):
+        maps_link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
+    elif data.get("store_lat") and data.get("store_lng"):
+        maps_link = fmt_gmaps_link(data["store_lat"], data["store_lng"])
+    elif data.get("deliv_lat") and data.get("deliv_lng"):
+        maps_link = fmt_gmaps_link(data["deliv_lat"], data["deliv_lng"])
+
+    if maps_link:
+        lines.append("")
+        lines.append(f"🗺️ <a href='{maps_link}'>Lihat di Google Maps</a>")
+
+    return "\n".join(lines)
 
 
 def fmt_arriving(order, data):
     label = order["label"]
-    return (
-        f"⚡ *PENGEMUDI HAMPIR TIBA!*\n\n"
-        f"📦 {label}\n"
-        f"🏪 {data['store_name']}\n\n"
-        f"🧑 {data['driver_name']}\n"
-        f"📞 `{data['driver_phone']}`\n"
-        f"🏍️ {data['driver_plate']}\n\n"
-        f"Segera siap-siap terima pesananmu!"
-    )
+    lines = [
+        f"⚡ <b>PENGEMUDI HAMPIR TIBA!</b>",
+        "",
+        f"📦 {label}",
+        f"🏪 {data['store_name']}",
+        "",
+    ]
+    if data.get('driver_name') and data['driver_name'] != "-":
+        lines.append(f"🧑 {data['driver_name']}")
+    if data.get('driver_phone') and data['driver_phone'] != "-":
+        lines.append(f"📞 <code>{data['driver_phone']}</code>")
+    if data.get('driver_plate') and data['driver_plate'] != "-":
+        lines.append(f"🏍️ {data['driver_plate']}")
+
+    if data.get("driver_lat") and data.get("driver_lng"):
+        maps_link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
+        if maps_link:
+            lines.append("")
+            lines.append(f"🗺️ <a href='{maps_link}'>Lihat Posisi Driver</a>")
+
+    lines.append("")
+    lines.append("Segera siap-siap terima pesananmu!")
+    return "\n".join(lines)
 
 
 def fmt_done(order, data):
     label = order["label"]
     return (
-        f"✅ *PESANAN SELESAI*\n\n"
+        f"✅ <b>PESANAN SELESAI</b>\n\n"
         f"📦 {label}\n"
         f"🏪 {data['store_name']}\n"
         f"📝 {data['item_count']} item\n"
@@ -47,7 +96,7 @@ def fmt_done(order, data):
 def fmt_cancelled(order, data):
     label = order["label"]
     return (
-        f"❌ *PESANAN DIBATALKAN*\n\n"
+        f"❌ <b>PESANAN DIBATALKAN</b>\n\n"
         f"📦 {label}\n"
         f"🏪 {data['store_name']}\n\n"
         f"Tracking dihentikan."
@@ -75,7 +124,7 @@ async def check_one_order(bot, order):
     if parsed["is_done"]:
         text = fmt_done(order, parsed)
         try:
-            await bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
         except Exception as e:
             print(f"[SFOOD] ❌ Gagal kirim notif done: {e}")
         db.sfood_stop_order(order_id)
@@ -86,7 +135,7 @@ async def check_one_order(bot, order):
     if parsed["is_cancelled"]:
         text = fmt_cancelled(order, parsed)
         try:
-            await bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
         except Exception as e:
             print(f"[SFOOD] ❌ Gagal kirim notif cancel: {e}")
         db.sfood_stop_order(order_id)
@@ -98,7 +147,7 @@ async def check_one_order(bot, order):
         if order.get("last_flag") != "arriving":
             text = fmt_arriving(order, parsed)
             try:
-                await bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
             except Exception as e:
                 print(f"[SFOOD] ❌ Gagal kirim notif arriving: {e}")
             db.sfood_update_flag(order_id, "arriving")
@@ -111,7 +160,7 @@ async def check_one_order(bot, order):
     if current_status != last_status:
         text = fmt_status_update(order, parsed)
         try:
-            await bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
         except Exception as e:
             print(f"[SFOOD] ❌ Gagal kirim notif status: {e}")
 
@@ -122,7 +171,7 @@ async def check_one_order(bot, order):
 
 
 async def tracker_worker(bot):
-    """Background worker: polling order aktif setiap N detik."""
+    """Background worker: polling semua order aktif setiap N detik."""
     print("[SFOOD] 🚀 Tracker worker started")
 
     while True:
