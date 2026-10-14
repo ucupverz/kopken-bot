@@ -15,26 +15,29 @@ def sfood_keyboard():
 
 async def cmd_sfood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🍔 *ShopeeFood Tracker*\n\n"
+        "🍔 <b>ShopeeFood Tracker</b>\n\n"
         "Aku bisa lacak pesanan ShopeeFood kamu realtime.\n\n"
-        "*Cara pakai:*\n"
+        "<b>Cara pakai:</b>\n"
         "1. Buka app ShopeeFood → halaman tracking order\n"
-        "2. Tap *Bagikan* → Copy link\n"
+        "2. Tap <b>Bagikan</b> → Copy link\n"
         "3. Kirim link ke bot ini\n\n"
-        "*Format:*\n"
-        "`<URL> <label opsional>`\n\n"
-        "*Contoh:*\n"
-        "`https://www.shopeefood.co.id/tracker?code=xxx&orderId=yyy`\n"
+        "<b>Format:</b>\n"
+        "<code>&lt;URL&gt; &lt;label opsional&gt;</code>\n\n"
+        "<b>Contoh:</b>\n"
+        "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy</code>\n"
         "atau\n"
-        "`https://www.shopeefood.co.id/tracker?code=xxx&orderId=yyy Corndog siang`\n\n"
-        "*Commands:*\n"
+        "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Corndog siang</code>\n\n"
+        "<b>Commands:</b>\n"
         "/sfood — Menu ini\n"
         "/sfood_list — List order aktif\n"
-        "/sfood_stop `<order_id>` — Stop 1 order\n"
+        "/sfood_stop &lt;order_id&gt; — Stop 1 order\n"
         "/sfood_stopall — Stop semua order"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
-                                     reply_markup=sfood_keyboard())
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=sfood_keyboard()
+    )
 
 
 async def cmd_sfood_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -48,30 +51,39 @@ async def cmd_sfood_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    lines = [f"📋 *Order Aktif ({len(orders)})*\n"]
+    lines = [f"📋 <b>Order Aktif ({len(orders)})</b>\n"]
     for o in orders:
         lines.append(
-            f"• `{o['order_id']}`\n"
+            f"• <code>{o['order_id']}</code>\n"
             f"  📦 {o['label']}\n"
             f"  Status: {o['last_status_text'] or '-'}\n"
             f"  ETA: {o['last_eta'] or '-'}\n"
         )
-    lines.append("\nStop 1 order: `/sfood_stop <order_id>`")
-    lines.append("Stop semua: `/sfood_stopall`")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    lines.append("\nStop 1 order: <code>/sfood_stop &lt;order_id&gt;</code>")
+    lines.append("Stop semua: <code>/sfood_stopall</code>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_sfood_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not ctx.args:
-        await update.message.reply_text("Usage: `/sfood_stop <order_id>`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "Usage: <code>/sfood_stop &lt;order_id&gt;</code>",
+            parse_mode=ParseMode.HTML
+        )
         return
     order_id = ctx.args[0]
     ok = db.sfood_stop_order(order_id, user_id=user.id)
     if ok:
-        await update.message.reply_text(f"✅ Order `{order_id}` dihentikan.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"✅ Order <code>{order_id}</code> dihentikan.",
+            parse_mode=ParseMode.HTML
+        )
     else:
-        await update.message.reply_text(f"❌ Order `{order_id}` tidak ditemukan atau sudah stop.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"❌ Order <code>{order_id}</code> tidak ditemukan atau sudah stop.",
+            parse_mode=ParseMode.HTML
+        )
 
 
 async def cmd_sfood_stopall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -94,15 +106,15 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     order_id, code = parse_tracker_url(url)
     if not order_id or not code:
         await update.message.reply_text(
-            "❌ Link tidak valid. Pastikan link dari tombol *Bagikan* di app ShopeeFood.",
-            parse_mode=ParseMode.MARKDOWN
+            "❌ Link tidak valid. Pastikan link dari tombol <b>Bagikan</b> di app ShopeeFood.",
+            parse_mode=ParseMode.HTML
         )
         return
 
     if db.sfood_order_exists(order_id):
         await update.message.reply_text(
-            f"⚠️ Order `{order_id}` sudah dilacak.",
-            parse_mode=ParseMode.MARKDOWN
+            f"⚠️ Order <code>{order_id}</code> sudah dilacak.",
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -133,16 +145,16 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     await msg.edit_text(
-        f"✅ *Order dilacak!*\n\n"
+        f"✅ <b>Order dilacak!</b>\n\n"
         f"📦 Label: {label}\n"
         f"🏪 Restoran: {parsed['store_name']}\n"
         f"🚗 Status: {parsed['status_text']}\n"
         f"⏱️ ETA: {parsed['eta_text']}\n"
         f"🧑 Driver: {parsed['driver_name']}\n"
-        f"📞 HP: `{parsed['driver_phone']}`\n"
+        f"📞 HP: <code>{parsed['driver_phone']}</code>\n"
         f"🏍️ Plat: {parsed['driver_plate']}\n\n"
         f"Aku akan kirim notif setiap ada perubahan status.\n"
-        f"Order ID: `{order_id}`",
-        parse_mode=ParseMode.MARKDOWN
+        f"Order ID: <code>{order_id}</code>",
+        parse_mode=ParseMode.HTML
     )
     print(f"[SFOOD] ✅ New order tracked: {order_id} by user {user.id}")
