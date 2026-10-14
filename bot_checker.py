@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import random
 import string
@@ -13,6 +14,13 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 import database as db
+
+# ShopeeFood Tracker
+from sfood_handlers import (
+    cmd_sfood, cmd_sfood_list, cmd_sfood_stop,
+    cmd_sfood_stopall, handle_sfood_message
+)
+from sfood_tracker import tracker_worker
 
 # ----------------------------------------------------------------------
 # CONFIG
@@ -42,7 +50,6 @@ def is_admin(user_id):
 
 
 def normalize_phone(text: str) -> str:
-    """Convert 08xxx → 628xxx untuk API call."""
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
     if t.startswith("0"):
         t = "62" + t[1:]
@@ -50,7 +57,6 @@ def normalize_phone(text: str) -> str:
 
 
 def format_phone_display(phone_62: str) -> str:
-    """Convert 628xxx kembali ke 08xxx untuk display."""
     if phone_62.startswith("62"):
         return "0" + phone_62[2:]
     return phone_62
@@ -85,15 +91,16 @@ def sanitize_voc_input(text):
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["🔑 Pakai Kode VOC", "❓ Bantuan"]
+        ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
+        ["❓ Bantuan"]
     ], resize_keyboard=True)
 
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["🔑 Pakai Kode VOC", "❓ Bantuan"],
-        ["🔧 Admin Panel"]
+        ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
+        ["🔧 Admin Panel", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 
@@ -126,14 +133,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
     text = (
         f"Halo {user.first_name}! 👋\n\n"
-        f"☕ *Bot Cek Nomor Kopi Kenangan*\n\n"
+        f"☕ *Bot Multi Fungsi*\n\n"
         f"📊 Kuota kamu: *{u['quota']}x cek*\n\n"
-        f"*Cara pakai:*\n"
-        f"1. Kirim kode VOC untuk dapat kuota\n"
-        f"2. Kirim nomor HP untuk cek\n\n"
-        f"*Catatan:* Kuota berkurang hanya kalau nomor FRESH (belum terdaftar).\n"
-        f"Nomor TERDAFTAR tidak mengurangi kuota.\n\n"
-        f"Butuh kode VOC? Minta ke admin."
+        f"*Fitur:*\n"
+        f"• ☕ Cek Nomor Kopi Kenangan\n"
+        f"• 🍔 ShopeeFood Tracker\n"
+        f"• 🔑 Redeem kode VOC\n\n"
+        f"Ketik `/help` untuk bantuan lengkap."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
@@ -141,16 +147,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *Bantuan*\n\n"
-        "*Cara pakai:*\n"
-        "1️⃣ Kirim kode VOC (contoh: `VOC-A1B2C3`) untuk dapat kuota\n"
-        "2️⃣ Kirim nomor HP untuk cek\n"
-        "3️⃣ Bisa kirim banyak nomor sekaligus (pisah baris) untuk bulk\n\n"
-        "*Output:*\n"
-        "• ✅ TERDAFTAR = sudah terdaftar (kuota tetap)\n"
-        "• ❌ BELUM TERDAFTAR = belum terdaftar (kuota -1)\n\n"
+        "*☕ Cek Nomor Kopi Kenangan:*\n"
+        "• Kirim 1 nomor atau banyak nomor (pisah baris)\n"
+        "• Kuota berkurang hanya kalau nomor FRESH\n\n"
+        "*🍔 ShopeeFood Tracker:*\n"
+        "• `/sfood` — Menu tracker\n"
+        "• Kirim link tracker + label → bot lacak otomatis\n\n"
+        "*🔑 Kode VOC:*\n"
+        "• Kirim kode VOC untuk dapat kuota cek\n\n"
         "*Commands:*\n"
         "/start — Menu utama\n"
         "/kuota — Cek kuota\n"
+        "/sfood — ShopeeFood Tracker\n"
         "/help — Bantuan ini"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
@@ -183,6 +191,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     u = db.get_user(user.id)
 
+    # === CEK LINK SHOPEEFOOD DULU ===
+    if "shopeefood.co.id/tracker" in text:
+        await handle_sfood_message(update, ctx)
+        return
+
     # Tombol menu
     if text == "☕ Cek Nomor":
         if u["quota"] <= 0:
@@ -208,6 +221,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Format: `VOC-XXXXXX`",
             parse_mode=ParseMode.MARKDOWN
         )
+        return
+
+    if text == "🍔 ShopeeFood":
+        await cmd_sfood(update, ctx)
         return
 
     if text == "❓ Bantuan":
@@ -329,7 +346,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elapsed = time.time() - start_time
         new_quota = db.get_user(user.id)["quota"]
 
-        # === FORMAT OUTPUT KE TELEGRAM ===
         out_lines = []
         out_lines.append("📊 HASIL PENGECEKAN NOMOR")
         out_lines.append("")
@@ -358,7 +374,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text_output = "\n".join(out_lines)
         await msg.edit_text(text_output)
 
-        # === FILE TXT ===
         file_out = ["=" * 40, "HASIL PENGECEKAN NOMOR", "=" * 40, ""]
         if reg_list:
             file_out.append(f"TERDAFTAR [{len(reg_list)}]:")
@@ -755,11 +770,22 @@ def main():
 
     db.init_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    async def post_init(app):
+        # Start ShopeeFood tracker worker
+        asyncio.create_task(tracker_worker(app.bot))
+        print("[SFOOD] Tracker worker started")
+
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("kuota", cmd_kuota))
+
+    # ShopeeFood
+    app.add_handler(CommandHandler("sfood", cmd_sfood))
+    app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
+    app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
+    app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
 
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("genvoc", cmd_genvoc))

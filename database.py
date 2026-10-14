@@ -19,6 +19,7 @@ if _db_dir and not os.path.exists(_db_dir):
 def init_db():
     with get_conn() as conn:
         c = conn.cursor()
+        # Tabel users
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -30,6 +31,7 @@ def init_db():
                 banned INTEGER DEFAULT 0
             )
         """)
+        # Tabel VOC codes
         c.execute("""
             CREATE TABLE IF NOT EXISTS voc_codes (
                 code TEXT PRIMARY KEY,
@@ -42,6 +44,7 @@ def init_db():
                 active INTEGER DEFAULT 1
             )
         """)
+        # Tabel transactions
         c.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +53,34 @@ def init_db():
                 amount INTEGER,
                 status TEXT,
                 note TEXT,
+                timestamp INTEGER
+            )
+        """)
+        # Tabel ShopeeFood orders
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_orders (
+                order_id TEXT PRIMARY KEY,
+                user_id INTEGER,
+                code TEXT,
+                label TEXT,
+                last_status INTEGER,
+                last_status_text TEXT,
+                last_eta TEXT,
+                last_driver TEXT,
+                last_driver_phone TEXT,
+                last_flag TEXT,
+                active INTEGER DEFAULT 1,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+        # Tabel ShopeeFood status log
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT,
+                status_code INTEGER,
+                status_text TEXT,
                 timestamp INTEGER
             )
         """)
@@ -257,3 +288,91 @@ def get_stats():
             "active_voc": active_voc,
             "total_voc": total_voc
         }
+
+
+# ----------------------------------------------------------------------
+# SHOPEEFOOD TRACKER
+# ----------------------------------------------------------------------
+
+def sfood_add_order(user_id, order_id, code, label, last_status,
+                    last_status_text, last_eta, last_driver, last_driver_phone):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_orders
+            (order_id, user_id, code, label, last_status, last_status_text,
+             last_eta, last_driver, last_driver_phone, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """, (order_id, user_id, code, label, last_status, last_status_text,
+              last_eta, last_driver, last_driver_phone, now, now))
+        conn.commit()
+
+
+def sfood_order_exists(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM sfood_orders WHERE order_id = ? AND active = 1", (order_id,))
+        return c.fetchone() is not None
+
+
+def sfood_get_active_orders():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_orders WHERE active = 1")
+        return c.fetchall()
+
+
+def sfood_get_orders_by_user(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_orders WHERE user_id = ? AND active = 1 ORDER BY created_at DESC", (user_id,))
+        return c.fetchall()
+
+
+def sfood_update_status(order_id, status_code, eta, driver, driver_phone):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            UPDATE sfood_orders
+            SET last_status = ?, last_eta = ?, last_driver = ?, last_driver_phone = ?, updated_at = ?
+            WHERE order_id = ?
+        """, (status_code, eta, driver, driver_phone, now, order_id))
+        conn.commit()
+
+
+def sfood_update_flag(order_id, flag):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sfood_orders SET last_flag = ? WHERE order_id = ?", (flag, order_id))
+        conn.commit()
+
+
+def sfood_add_log(order_id, status_code, status_text):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_status_log (order_id, status_code, status_text, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (order_id, status_code, status_text, int(time.time())))
+        conn.commit()
+
+
+def sfood_stop_order(order_id, user_id=None):
+    with get_conn() as conn:
+        c = conn.cursor()
+        if user_id:
+            c.execute("UPDATE sfood_orders SET active = 0 WHERE order_id = ? AND user_id = ?", (order_id, user_id))
+        else:
+            c.execute("UPDATE sfood_orders SET active = 0 WHERE order_id = ?", (order_id,))
+        conn.commit()
+        return c.rowcount > 0
+
+
+def sfood_stop_all_user(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sfood_orders SET active = 0 WHERE user_id = ? AND active = 1", (user_id,))
+        conn.commit()
+        return c.rowcount
