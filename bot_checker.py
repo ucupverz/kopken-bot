@@ -15,7 +15,6 @@ from telegram.constants import ParseMode
 
 import database as db
 
-# ShopeeFood
 from sfood_handlers import (
     cmd_sfood, cmd_sfood_list, cmd_sfood_stop,
     cmd_sfood_stopall, handle_sfood_message
@@ -25,22 +24,16 @@ from sfood_admin_handlers import (
     cmd_sfood_users, cmd_sfood_leaderboard, cmd_sfood_userinfo
 )
 from sfood_telemetry import (
-    cmd_telemetry, cmd_telemetry_on, cmd_telemetry_off,
-    cmd_proximity_set, cmd_stagnation_set,
-    cmd_sfood_metrics, cmd_live_loc, handle_live_location
+    cmd_telemetry, cmd_pantau_on, cmd_pantau_off,
+    cmd_jarak_set, cmd_stuck_set,
+    cmd_sfood_metrics, cmd_lokasi_saya, handle_live_location
 )
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
-
-# ----------------------------------------------------------------------
-# CONFIG
-# ----------------------------------------------------------------------
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
 NASKY_BASE = "https://nasky.web.id"
-
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-
 DEFAULT_VOC_QUOTA = int(os.getenv("DEFAULT_VOC_QUOTA", "3"))
 
 logging.basicConfig(
@@ -54,20 +47,20 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
-def normalize_phone(text: str) -> str:
+def normalize_phone(text):
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
     if t.startswith("0"):
         t = "62" + t[1:]
     return t
 
 
-def format_phone_display(phone_62: str) -> str:
+def format_phone_display(phone_62):
     if phone_62.startswith("62"):
         return "0" + phone_62[2:]
     return phone_62
 
 
-def is_valid_phone(text: str) -> bool:
+def is_valid_phone(text):
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
     if not t.isdigit():
         return False
@@ -96,7 +89,7 @@ def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
         ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
-        ["📊 Tarif ShopeeFood", "📡 Telemetri"],
+        ["📊 Tarif ShopeeFood", "📡 Pantau Kurir"],
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
@@ -105,12 +98,12 @@ def admin_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
         ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
-        ["📊 Tarif ShopeeFood", "📡 Telemetri"],
+        ["📊 Tarif ShopeeFood", "📡 Pantau Kurir"],
         ["🔧 Admin Panel", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 
-async def nasky_cek_single(nomor: str) -> dict:
+async def nasky_cek_single(nomor):
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             r = await client.post(
@@ -123,11 +116,10 @@ async def nasky_cek_single(nomor: str) -> dict:
             return {"success": False, "detail": f"Network error: {e}"}
 
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_start(update, ctx):
     user = update.effective_user
     db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
-
     kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
     text = (
         f"Halo {user.first_name}! 👋\n\n"
@@ -137,14 +129,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• ☕ Cek Nomor Kopi Kenangan\n"
         f"• 🍔 ShopeeFood Tracker\n"
         f"• 📊 Tarif ShopeeFood\n"
-        f"• 📡 Telemetri\n"
+        f"• 📡 Pantau Kurir\n"
         f"• 🔑 Redeem kode VOC\n\n"
         f"Ketik `/help` untuk bantuan."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 
-async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_help(update, ctx):
     text = (
         "📖 *Bantuan*\n\n"
         "*☕ Cek Nomor Kopi Kenangan:*\n"
@@ -152,9 +144,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*🍔 ShopeeFood Tracker:*\n"
         "• Kirim link tracker + label\n"
         "• `/sfood` — Menu tracker\n\n"
-        "*📡 Telemetri:*\n"
-        "• `/telemetry` — Menu telemetri\n"
-        "• `/sfood_metrics <order_id>` — Metrik\n\n"
+        "*📡 Pantau Kurir:*\n"
+        "• `/telemetry` — Menu Pantau Kurir\n"
+        "• `/sfood_metrics <order_id>` — Statistik order\n\n"
         "*📊 Tarif:*\n"
         "• `/tarif <angka>` — Input biaya layanan\n\n"
         "*Commands:*\n"
@@ -163,7 +155,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_kuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_kuota(update, ctx):
     user = update.effective_user
     u = db.get_user(user.id)
     if not u:
@@ -177,13 +169,12 @@ async def cmd_kuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update, ctx):
     text = (update.message.text or "").strip()
     user = update.effective_user
 
     if not db.get_user(user.id):
         db.create_user(user.id, user.username or "", user.first_name or "")
-
     u = db.get_user(user.id)
 
     if "shopeefood.co.id/tracker" in text:
@@ -192,16 +183,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if text == "☕ Cek Nomor":
         if u["quota"] <= 0:
-            await update.message.reply_text(
-                "❌ Kuota kamu habis.\n\n"
-                "Kirim kode VOC untuk dapat kuota baru, atau minta ke admin."
-            )
+            await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
         else:
             await update.message.reply_text(
-                "Kirim nomor HP yang mau dicek, contoh:\n`081234567890`\n\n"
-                "Bisa banyak nomor sekaligus (pisah baris).",
-                parse_mode=ParseMode.MARKDOWN
-            )
+                "Kirim nomor HP yang mau dicek, contoh:\n`081234567890`",
+                parse_mode=ParseMode.MARKDOWN)
         return
 
     if text == "📊 Kuota Saya":
@@ -220,9 +206,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text == "🍔 Tambah Order":
         await update.message.reply_text(
             "Kirim link tracker ShopeeFood + label opsional.\n\n"
-            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Corndog siang</code>",
-            parse_mode=ParseMode.HTML
-        )
+            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Label</code>",
+            parse_mode=ParseMode.HTML)
         return
 
     if text == "📋 List Order":
@@ -231,20 +216,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if text == "❌ Stop Order":
         await update.message.reply_text(
-            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\n"
-            "Atau stop semua: /sfood_stopall",
-            parse_mode=ParseMode.HTML
-        )
+            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall",
+            parse_mode=ParseMode.HTML)
         return
 
     if text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
         await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n"
-            f"📊 Kuota: <b>{u['quota']}x cek</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb
-        )
+            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     if text == "📊 Tarif ShopeeFood":
@@ -253,11 +233,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "<code>/tarif &lt;angka&gt;</code> — Input biaya\n"
             "<code>/tarif_cek</code> — Cek status\n"
             "<code>/tarif_stats</code> — Statistik",
-            parse_mode=ParseMode.HTML
-        )
+            parse_mode=ParseMode.HTML)
         return
 
-    if text == "📡 Telemetri":
+    if text == "📡 Pantau Kurir":
         await cmd_telemetry(update, ctx)
         return
 
@@ -274,10 +253,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         success, message, quota = db.use_voc(text_upper, user.id)
         if success:
             await update.message.reply_text(
-                f"✅ *{message}*\n\n"
-                f"Sekarang kamu punya *{db.get_user(user.id)['quota']}x* kuota cek.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+                f"✅ *{message}*\n\nSekarang kamu punya *{db.get_user(user.id)['quota']}x* kuota.",
+                parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text(f"❌ {message}")
         return
@@ -286,70 +263,49 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if len(lines) == 1 and is_valid_phone(lines[0]):
         if u["quota"] <= 0:
-            await update.message.reply_text("❌ Kuota kamu habis.\n\nPakai kode VOC baru untuk dapat kuota.")
+            await update.message.reply_text("❌ Kuota habis.")
             return
-
         msg = await update.message.reply_text("🔍 Mengecek...")
         start_time = time.time()
         result = await nasky_cek_single(normalize_phone(lines[0]))
         elapsed = time.time() - start_time
-
         if not result.get("success"):
             await msg.edit_text(f"❌ Error: {result.get('detail', 'Unknown')}")
             return
-
         d = result["data"]
         status = d["status"]
         phone_display = format_phone_display(d["phone"])
-
         if status == "fresh":
             db.use_quota(user.id)
             db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
         else:
             db.add_transaction(user.id, "cek", 0, "success", f"{status} {d['phone']}")
-
         new_quota = db.get_user(user.id)["quota"]
-
         if status == "fresh":
-            reply = (
-                f"📊 HASIL PENGECEKAN NOMOR\n\n"
-                f"❌ BELUM TERDAFTAR [1]:\n"
-                f"{phone_display}\n\n"
-                f"⏱️ Waktu: {elapsed:.2f} detik\n"
-                f"💳 Sisa Kuota: {new_quota} Kredit"
-            )
+            reply = (f"📊 HASIL PENGECEKAN NOMOR\n\n"
+                     f"❌ BELUM TERDAFTAR [1]:\n{phone_display}\n\n"
+                     f"⏱️ Waktu: {elapsed:.2f} detik\n"
+                     f"💳 Sisa Kuota: {new_quota} Kredit")
         elif status == "registered":
-            reply = (
-                f"📊 HASIL PENGECEKAN NOMOR\n\n"
-                f"✅ TERDAFTAR [1]:\n"
-                f"{phone_display} | {d.get('customer_name') or '-'}\n\n"
-                f"⏱️ Waktu: {elapsed:.2f} detik\n"
-                f"💳 Sisa Kuota: {new_quota} Kredit"
-            )
+            reply = (f"📊 HASIL PENGECEKAN NOMOR\n\n"
+                     f"✅ TERDAFTAR [1]:\n{phone_display} | {d.get('customer_name') or '-'}\n\n"
+                     f"⏱️ Waktu: {elapsed:.2f} detik\n"
+                     f"💳 Sisa Kuota: {new_quota} Kredit")
         else:
             reply = f"❓ Status tidak dikenal: `{status}`"
-
         await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
         return
 
     valid = [normalize_phone(l) for l in lines if is_valid_phone(l)]
     if valid:
         if u["quota"] < len(valid):
-            await update.message.reply_text(
-                f"❌ Kuota tidak cukup.\n\n"
-                f"Butuh: {len(valid)}x (max)\n"
-                f"Kuota: {u['quota']}x\n\n"
-                f"Kuota hanya berkurang untuk nomor FRESH."
-            )
+            await update.message.reply_text(f"❌ Kuota tidak cukup (butuh {len(valid)}x).")
             return
-
         msg = await update.message.reply_text(f"🔍 Mengecek {len(valid)} nomor...")
-
         start_time = time.time()
         fresh_list = []
         reg_list = []
         invalid_list = []
-
         for nomor in valid:
             r = await nasky_cek_single(nomor)
             if not r.get("success"):
@@ -366,10 +322,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 db.add_transaction(user.id, "cek", 0, "success", f"REG {d['phone']}")
             else:
                 invalid_list.append(phone_display)
-
         elapsed = time.time() - start_time
         new_quota = db.get_user(user.id)["quota"]
-
         out_lines = ["📊 HASIL PENGECEKAN NOMOR", ""]
         if reg_list:
             out_lines.append(f"✅ TERDAFTAR [{len(reg_list)}]:")
@@ -388,9 +342,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             out_lines.append("")
         out_lines.append(f"⏱️ Waktu: {elapsed:.2f} detik")
         out_lines.append(f"💳 Sisa Kuota: {new_quota} Kredit")
-
         await msg.edit_text("\n".join(out_lines))
-
         file_out = ["=" * 40, "HASIL PENGECEKAN NOMOR", "=" * 40, ""]
         if reg_list:
             file_out.append(f"TERDAFTAR [{len(reg_list)}]:")
@@ -407,20 +359,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for ph in invalid_list:
                 file_out.append(ph)
             file_out.append("")
-        file_out.append(f"Waktu: {elapsed:.2f} detik")
-        file_out.append(f"Sisa Kuota: {new_quota} Kredit")
-
         file_bytes = "\n".join(file_out).encode("utf-8")
         await update.message.reply_document(document=file_bytes, filename="hasil_cek.txt")
         return
 
-    await update.message.reply_text(
-        "❌ Format tidak dikenali.\n\n"
-        "Kirim nomor HP atau kode VOC."
-    )
+    await update.message.reply_text("❌ Format tidak dikenali.")
 
 
-async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     s = db.get_stats()
@@ -430,20 +376,17 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"☕ Total cek: {s['total_cek']}\n"
         f"🔑 VOC aktif: {s['active_voc']}\n"
         f"🔑 Total VOC: {s['total_voc']}\n\n"
-        f"*Generate VOC:*\n"
-        f"`/genvoc` `[kuota]` `[kode custom]`\n\n"
+        f"*Generate VOC:* `/genvoc` `[kuota]` `[kode]`\n\n"
         f"*ShopeeFood Admin:*\n"
         f"`/sfood_users` — List user\n"
         f"`/sfood_leaderboard` — Leaderboard\n"
         f"`/sfood_userinfo <id>` — Detail user\n\n"
-        f"*Kelola:*\n"
-        f"`/revoke <kode>` `/addkuota <id> <n>`\n"
-        f"`/users` `/userinfo <id>` `/stats`"
+        f"*Kelola:* `/revoke <kode>` `/addkuota <id> <n>`"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_genvoc(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     args = ctx.args or []
@@ -452,7 +395,7 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             code = gen_voc_code()
             if db.create_voc(code, DEFAULT_VOC_QUOTA, update.effective_user.id):
                 await update.message.reply_text(
-                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{DEFAULT_VOC_QUOTA}x cek*",
+                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{DEFAULT_VOC_QUOTA}x*",
                     parse_mode=ParseMode.MARKDOWN)
                 return
         return
@@ -462,7 +405,7 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             code = gen_voc_code()
             if db.create_voc(code, quota, update.effective_user.id):
                 await update.message.reply_text(
-                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{quota}x cek*",
+                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{quota}x*",
                     parse_mode=ParseMode.MARKDOWN)
                 return
         return
@@ -480,7 +423,8 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(args) >= 2:
         custom = sanitize_voc_input(args[0])
         if not custom or not args[1].isdigit():
-            await update.message.reply_text("❌ Format: `/genvoc <KODE> <KUOTA>`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text("❌ Format: `/genvoc <KODE> <KUOTA>`",
+                                             parse_mode=ParseMode.MARKDOWN)
             return
         quota = int(args[1])
         if db.create_voc(custom, quota, update.effective_user.id):
@@ -490,7 +434,7 @@ async def cmd_genvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
 
 
-async def cmd_listvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_listvoc(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     rows = db.list_voc_codes(20)
@@ -504,7 +448,7 @@ async def cmd_listvoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_revoke(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_revoke(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     if not ctx.args:
@@ -515,7 +459,7 @@ async def cmd_revoke(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                      parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_addkuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_addkuota(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     if len(ctx.args) < 2:
@@ -535,7 +479,7 @@ async def cmd_addkuota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                      parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_stats(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     s = db.get_stats()
@@ -548,7 +492,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_users(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     users = db.list_all_users(limit=50)
@@ -565,7 +509,7 @@ async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_userinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_userinfo(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     if not ctx.args:
@@ -600,7 +544,7 @@ async def cmd_userinfo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_vocdetail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_vocdetail(update, ctx):
     if not is_admin(update.effective_user.id):
         return
     if not ctx.args:
@@ -635,7 +579,7 @@ async def cmd_vocdetail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
 
 
@@ -660,7 +604,6 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("kuota", cmd_kuota))
 
-    # ShopeeFood
     app.add_handler(CommandHandler("sfood", cmd_sfood))
     app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
     app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
@@ -669,21 +612,19 @@ def main():
     app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
     app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
 
-    # Telemetri
+    # Pantau Kurir (nama baru)
     app.add_handler(CommandHandler("telemetry", cmd_telemetry))
-    app.add_handler(CommandHandler("telemetry_on", cmd_telemetry_on))
-    app.add_handler(CommandHandler("telemetry_off", cmd_telemetry_off))
-    app.add_handler(CommandHandler("proximity_set", cmd_proximity_set))
-    app.add_handler(CommandHandler("stagnation_set", cmd_stagnation_set))
+    app.add_handler(CommandHandler("pantau_on", cmd_pantau_on))
+    app.add_handler(CommandHandler("pantau_off", cmd_pantau_off))
+    app.add_handler(CommandHandler("jarak_set", cmd_jarak_set))
+    app.add_handler(CommandHandler("stuck_set", cmd_stuck_set))
     app.add_handler(CommandHandler("sfood_metrics", cmd_sfood_metrics))
-    app.add_handler(CommandHandler("live_loc", cmd_live_loc))
+    app.add_handler(CommandHandler("lokasi_saya", cmd_lokasi_saya))
 
-    # Tarif
     app.add_handler(CommandHandler("tarif", cmd_tarif))
     app.add_handler(CommandHandler("tarif_cek", cmd_tarif_cek))
     app.add_handler(CommandHandler("tarif_stats", cmd_tarif_stats))
 
-    # Admin
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("genvoc", cmd_genvoc))
     app.add_handler(CommandHandler("listvoc", cmd_listvoc))
@@ -694,10 +635,7 @@ def main():
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
 
-    # Live location handler
     app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
-
-    # Text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

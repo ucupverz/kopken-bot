@@ -28,7 +28,7 @@ def build_maps_section(data):
     if data.get("driver_lat") and data.get("driver_lng"):
         link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
         if link:
-            links.append(f"   🚗 <a href='{link}'>Posisi Driver</a>")
+            links.append(f"   🚗 <a href='{link}'>Posisi Kurir</a>")
     if data.get("store_lat") and data.get("store_lng"):
         link = fmt_gmaps_link(data["store_lat"], data["store_lng"])
         if link:
@@ -49,12 +49,12 @@ def fmt_status_update(order, data):
         f"📦 {label}",
         "",
         f"🚗 Status: <b>{data['status_text']}</b>",
-        f"⏱️ ETA: {data['eta_text']}",
+        f"⏱️ Estimasi tiba: {data['eta_text']}",
         f"🏪 {data['store_name']}",
     ]
     if data.get('driver_name') and data['driver_name'] != "-":
         lines.append("")
-        lines.append(f"🧑 Driver: {data['driver_name']}")
+        lines.append(f"🧑 Kurir: {data['driver_name']}")
         if data.get('driver_phone') and data['driver_phone'] != "-":
             lines.append(f"📞 HP: <code>{data['driver_phone']}</code>")
         if data.get('driver_plate') and data['driver_plate'] != "-":
@@ -66,7 +66,7 @@ def fmt_status_update(order, data):
 def fmt_arriving(order, data):
     label = order["label"]
     lines = [
-        f"⚡ <b>PENGEMUDI HAMPIR TIBA!</b>",
+        f"⚡ <b>KURIR HAMPIR TIBA!</b>",
         "",
         f"📦 {label}",
         f"🏪 {data['store_name']}",
@@ -80,7 +80,7 @@ def fmt_arriving(order, data):
         lines.append(f"🏍️ {data['driver_plate']}")
     lines.extend(build_maps_section(data))
     lines.append("")
-    lines.append("Segera siap-siap terima pesananmu!")
+    lines.append("Siap-siap terima pesanan!")
     return "\n".join(lines)
 
 
@@ -155,7 +155,7 @@ async def send_proof_images(bot, user_id, parsed, label):
 
 
 async def process_telemetry(bot, order, parsed):
-    """Proses fitur telemetri."""
+    """Proses fitur pantau kurir."""
     user_id = order["user_id"]
     order_id = order["order_id"]
     settings = db.tel_get_settings(user_id)
@@ -168,7 +168,7 @@ async def process_telemetry(bot, order, parsed):
     bot.bot_data[f"driver_lat_{order_id}"] = driver_lat
     bot.bot_data[f"driver_lng_{order_id}"] = driver_lng
 
-    # 1. Proximity Alert
+    # 1. Alert Kurir Dekat
     if settings["proximity_enabled"] and driver_lat and deliv_lat:
         dist = haversine_distance(driver_lat, driver_lng, deliv_lat, deliv_lng)
         if dist is not None and dist <= settings["proximity_km"]:
@@ -179,7 +179,7 @@ async def process_telemetry(bot, order, parsed):
                 new_flag = f"{last_flag},{flag_key}".strip(",")
                 db.sfood_update_flag(order_id, new_flag)
 
-    # 2. Stagnation Detector
+    # 2. Alert Kurir Stuck
     if settings["stagnation_enabled"]:
         await check_stagnation(bot, user_id, order, settings)
 
@@ -199,7 +199,7 @@ async def send_proximity_alert(bot, user_id, order, parsed, dist):
                 await bot.send_photo(
                     chat_id=user_id,
                     photo=InputFile(bio, filename="proximity.png"),
-                    caption=f"🚨 Driver dekat! Jarak: {dist:.2f} km"
+                    caption=f"🚨 Kurir dekat! Jarak: {dist:.2f} km"
                 )
     except Exception as e:
         print(f"[SFOOD] ❌ Proximity map error: {e}")
@@ -209,7 +209,7 @@ async def send_proximity_alert(bot, user_id, order, parsed, dist):
         f"📦 {label}\n"
         f"🏍️ {driver_name}\n"
         f"📏 Jarak ke lokasi: <b>{dist:.2f} km</b>\n\n"
-        f"Segera bersiap terima pesanan!"
+        f"Siap-siap terima pesanan!"
     )
     try:
         await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
@@ -236,15 +236,15 @@ async def check_stagnation(bot, user_id, order, settings):
 
     if elapsed_min >= threshold and not stag["alerted_at"]:
         text = (
-            f"⚠️ <b>KURIR TERJEDA?</b>\n\n"
+            f"⏸️ <b>KURIR LAMA DIAM?</b>\n\n"
             f"📦 {order['label']}\n"
-            f"⏱️ Status tidak berubah: <b>{elapsed_min} menit</b>\n"
-            f"📍 Status terakhir: {order['last_status_text'] or '-'}\n\n"
-            f"<i>Kemungkinan kurir sedang:</i>\n"
-            f"• Mengantar pesanan pembeli lain\n"
+            f"⏱️ Status terakhir: <b>{elapsed_min} menit lalu</b>\n"
+            f"📍 Posisi terakhir: {order['last_status_text'] or '-'}\n\n"
+            f"<i>Kemungkinan kurir:</i>\n"
+            f"• Sedang antar pesanan pembeli lain\n"
             f"• Terjebak macet\n"
-            f"• Istirahat / kendala teknis\n\n"
-            f"Tunggu beberapa saat lagi. Kalau >30 menit, hubungi kurir langsung."
+            f"• Istirahat / ada kendala\n\n"
+            f"Tunggu lagi ya. Kalau lebih dari 30 menit, coba hubungi kurir langsung."
         )
         try:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
@@ -312,7 +312,7 @@ async def check_one_order(bot, order):
     if parsed["is_arriving"]:
         if order.get("last_flag") != "arriving":
             await send_map(bot, user_id, parsed,
-                           caption=f"⚡ Driver hampir tiba: {parsed.get('driver_name') or '-'}")
+                           caption=f"⚡ Kurir hampir tiba: {parsed.get('driver_name') or '-'}")
             text = fmt_arriving(order, parsed)
             try:
                 await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")

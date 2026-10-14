@@ -1,5 +1,5 @@
 """
-Modul telemetri ShopeeFood.
+Modul pantau kurir ShopeeFood (bahasa umum).
 """
 
 import math
@@ -21,7 +21,6 @@ def haversine_distance(lat1, lng1, lat2, lng2):
         lat1, lng1, lat2, lng2 = float(lat1), float(lng1), float(lat2), float(lng2)
     except Exception:
         return None
-
     if lat1 == 0 and lng1 == 0:
         return None
     if lat2 == 0 and lng2 == 0:
@@ -32,7 +31,6 @@ def haversine_distance(lat1, lng1, lat2, lng2):
     lat2_rad = math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlng = math.radians(lng2 - lng1)
-
     a = (math.sin(dlat / 2) ** 2 +
          math.cos(lat1_rad) * math.cos(lat2_rad) *
          math.sin(dlng / 2) ** 2)
@@ -50,113 +48,171 @@ def ts_to_wib(ts):
         return "-"
 
 
+# ======================================================================
+# MENU PANTAU KURIR
+# ======================================================================
+
 async def cmd_telemetry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     s = db.tel_get_settings(user.id)
 
-    proxim_status = "🟢 ON" if s["proximity_enabled"] else "⚪ OFF"
-    stag_status = "🟢 ON" if s["stagnation_enabled"] else "⚪ OFF"
-    live_status = "🟢 ON" if s["live_loc_enabled"] else "⚪ OFF"
+    dekat_status = "🟢 Aktif" if s["proximity_enabled"] else "⚪ Mati"
+    stuck_status = "🟢 Aktif" if s["stagnation_enabled"] else "⚪ Mati"
+    lokasi_status = "🟢 Aktif" if s["live_loc_enabled"] else "⚪ Mati"
 
     text = (
-        "📡 <b>Telemetri ShopeeFood</b>\n"
+        "📡 <b>Pantau Kurir</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>Fitur:</b>\n\n"
-        "1️⃣ <b>Proximity Alert</b> — "
-        f"{proxim_status}\n"
-        f"   📏 Threshold: <b>{s['proximity_km']} km</b>\n"
-        "   <i>Notif + map otomatis saat driver dekat lokasi kamu.</i>\n\n"
-        "2️⃣ <b>Stagnation Detector</b> — "
-        f"{stag_status}\n"
-        f"   ⏱️ Threshold: <b>{s['stagnation_min']} menit</b>\n"
-        "   <i>Alert kalau driver stuck lama (macet / antar order lain).</i>\n\n"
-        "3️⃣ <b>Live Location</b> — "
-        f"{live_status}\n"
-        "   <i>Share lokasi kamu ke bot, bot hitung jarak ke driver.</i>\n\n"
+        "Fitur biar kamu makin gampang pantau pesanan:\n\n"
+        "🚨 <b>Alert Kurir Dekat</b> — "
+        f"{dekat_status}\n"
+        f"   📏 Jarak alert: <b>{s['proximity_km']} km</b>\n"
+        "   <i>Bot kirim notif + map saat kurir dekat lokasi kamu.</i>\n\n"
+        "⏸️ <b>Alert Kurir Stuck</b> — "
+        f"{stuck_status}\n"
+        f"   ⏱️ Waktu tunggu: <b>{s['stagnation_min']} menit</b>\n"
+        "   <i>Bot kasih tau kalau kurir diam terlalu lama.</i>\n\n"
+        "📍 <b>Lokasi Saya</b> — "
+        f"{lokasi_status}\n"
+        "   <i>Share lokasi kamu, bot hitung jarak ke kurir.</i>\n\n"
+        "📊 <b>Statistik Order</b>\n"
+        "   <i>Info durasi & timeline pesanan kamu.</i>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>Command:</b>\n"
-        "<code>/telemetry_on proximity</code> — Aktifkan\n"
-        "<code>/telemetry_off proximity</code> — Matikan\n"
-        "<code>/proximity_set 1.5</code> — Ubah threshold km\n"
-        "<code>/stagnation_set 20</code> — Ubah threshold menit\n"
-        "<code>/sfood_metrics &lt;order_id&gt;</code> — Metrik\n"
-        "<code>/live_loc</code> — Share lokasi"
+        "<b>Cara pakai:</b>\n"
+        "<code>/pantau_on dekat</code> — Aktifkan Alert Dekat\n"
+        "<code>/pantau_off dekat</code> — Matikan\n"
+        "<code>/pantau_on stuck</code> — Aktifkan Alert Stuck\n"
+        "<code>/jarak_set 1.5</code> — Ubah jarak alert\n"
+        "<code>/stuck_set 20</code> — Ubah waktu alert\n"
+        "<code>/sfood_metrics &lt;order_id&gt;</code> — Statistik\n"
+        "<code>/lokasi_saya</code> — Share lokasi"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def cmd_telemetry_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_pantau_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Aktifkan fitur pantau kurir."""
     user = update.effective_user
     if not ctx.args:
-        await update.message.reply_text("Usage: <code>/telemetry_on proximity|stagnation|live_loc</code>",
-                                         parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "Pilih fitur:\n"
+            "<code>/pantau_on dekat</code> — Alert kurir dekat\n"
+            "<code>/pantau_on stuck</code> — Alert kurir stuck\n"
+            "<code>/pantau_on lokasi</code> — Share lokasi",
+            parse_mode=ParseMode.HTML
+        )
         return
+
     feat = ctx.args[0].lower()
-    if feat == "proximity":
+    if feat in ("dekat", "proximity"):
         db.tel_update_settings(user.id, proximity_enabled=1)
-        await update.message.reply_text("✅ Proximity Alert: <b>ON</b>", parse_mode=ParseMode.HTML)
-    elif feat == "stagnation":
+        await update.message.reply_text(
+            "🚨 <b>Alert Kurir Dekat: AKTIF</b>\n\n"
+            "Bot akan kirim notif + map saat kurir dekat lokasi kamu.",
+            parse_mode=ParseMode.HTML
+        )
+    elif feat in ("stuck", "stagnation"):
         db.tel_update_settings(user.id, stagnation_enabled=1)
-        await update.message.reply_text("✅ Stagnation Detector: <b>ON</b>", parse_mode=ParseMode.HTML)
-    elif feat in ("live_loc", "liveloc"):
+        await update.message.reply_text(
+            "⏸️ <b>Alert Kurir Stuck: AKTIF</b>\n\n"
+            "Bot akan kasih tau kalau kurir diam terlalu lama.",
+            parse_mode=ParseMode.HTML
+        )
+    elif feat in ("lokasi", "loc", "live_loc"):
         db.tel_update_settings(user.id, live_loc_enabled=1)
-        await update.message.reply_text("✅ Live Location: <b>ON</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "📍 <b>Lokasi Saya: AKTIF</b>\n\n"
+            "Sekarang kamu bisa share lokasi ke bot:\n"
+            "<code>/lokasi_saya</code> — instruksi lengkap",
+            parse_mode=ParseMode.HTML
+        )
     else:
-        await update.message.reply_text("❌ Fitur tidak dikenal.")
+        await update.message.reply_text("❌ Pilihan: dekat / stuck / lokasi")
 
 
-async def cmd_telemetry_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_pantau_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Matikan fitur pantau kurir."""
     user = update.effective_user
     if not ctx.args:
-        await update.message.reply_text("Usage: <code>/telemetry_off proximity|stagnation|live_loc</code>",
-                                         parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "Pilih fitur:\n"
+            "<code>/pantau_off dekat</code>\n"
+            "<code>/pantau_off stuck</code>\n"
+            "<code>/pantau_off lokasi</code>",
+            parse_mode=ParseMode.HTML
+        )
         return
+
     feat = ctx.args[0].lower()
-    if feat == "proximity":
+    if feat in ("dekat", "proximity"):
         db.tel_update_settings(user.id, proximity_enabled=0)
-        await update.message.reply_text("⚪ Proximity Alert: <b>OFF</b>", parse_mode=ParseMode.HTML)
-    elif feat == "stagnation":
+        await update.message.reply_text("⚪ Alert Kurir Dekat: <b>MATI</b>", parse_mode=ParseMode.HTML)
+    elif feat in ("stuck", "stagnation"):
         db.tel_update_settings(user.id, stagnation_enabled=0)
-        await update.message.reply_text("⚪ Stagnation Detector: <b>OFF</b>", parse_mode=ParseMode.HTML)
-    elif feat in ("live_loc", "liveloc"):
+        await update.message.reply_text("⚪ Alert Kurir Stuck: <b>MATI</b>", parse_mode=ParseMode.HTML)
+    elif feat in ("lokasi", "loc", "live_loc"):
         db.tel_update_settings(user.id, live_loc_enabled=0)
-        await update.message.reply_text("⚪ Live Location: <b>OFF</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("⚪ Lokasi Saya: <b>MATI</b>", parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text("❌ Fitur tidak dikenal.")
+        await update.message.reply_text("❌ Pilihan: dekat / stuck / lokasi")
 
 
-async def cmd_proximity_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_jarak_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Set jarak alert kurir dekat (dalam km)."""
     user = update.effective_user
     if not ctx.args:
-        await update.message.reply_text("Usage: <code>/proximity_set 1.5</code>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "Berapa jarak alert? Contoh:\n"
+            "<code>/jarak_set 1.5</code>\n"
+            "<i>Alert saat kurir 1.5 km dari lokasi kamu.</i>",
+            parse_mode=ParseMode.HTML
+        )
         return
     try:
         km = float(ctx.args[0])
         if km < 0.1 or km > 20:
-            await update.message.reply_text("❌ Threshold harus antara 0.1 - 20 km.")
+            await update.message.reply_text("❌ Jarak harus antara 0.1 - 20 km.")
             return
         db.tel_update_settings(user.id, proximity_km=km)
-        await update.message.reply_text(f"✅ Proximity threshold: <b>{km} km</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            f"✅ Alert Kurir Dekat: <b>{km} km</b>\n\n"
+            f"Bot akan notif saat kurir {km} km dari lokasi kamu.",
+            parse_mode=ParseMode.HTML
+        )
     except ValueError:
-        await update.message.reply_text("❌ Format salah. Contoh: <code>/proximity_set 1.5</code>",
+        await update.message.reply_text("❌ Format salah. Contoh: <code>/jarak_set 1.5</code>",
                                          parse_mode=ParseMode.HTML)
 
 
-async def cmd_stagnation_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_stuck_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Set waktu alert kurir stuck (dalam menit)."""
     user = update.effective_user
     if not ctx.args:
-        await update.message.reply_text("Usage: <code>/stagnation_set 20</code>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "Berapa menit? Contoh:\n"
+            "<code>/stuck_set 20</code>\n"
+            "<i>Alert kalau kurir diam 20 menit.</i>",
+            parse_mode=ParseMode.HTML
+        )
         return
     try:
         min_val = int(ctx.args[0])
         if min_val < 5 or min_val > 120:
-            await update.message.reply_text("❌ Threshold harus antara 5 - 120 menit.")
+            await update.message.reply_text("❌ Waktu harus antara 5 - 120 menit.")
             return
         db.tel_update_settings(user.id, stagnation_min=min_val)
-        await update.message.reply_text(f"✅ Stagnation threshold: <b>{min_val} menit</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            f"✅ Alert Kurir Stuck: <b>{min_val} menit</b>\n\n"
+            f"Bot akan kasih tau kalau kurir diam {min_val} menit.",
+            parse_mode=ParseMode.HTML
+        )
     except ValueError:
         await update.message.reply_text("❌ Format salah.")
 
+
+# ======================================================================
+# STATISTIK ORDER
+# ======================================================================
 
 async def cmd_sfood_metrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -177,8 +233,8 @@ async def cmd_sfood_metrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     events = db.metrics_get(order_id)
     if not events:
         await update.message.reply_text(
-            f"📊 Belum ada metrik untuk order ini.\n\n"
-            "Metrik dicatat otomatis saat status berubah.",
+            f"📊 Belum ada statistik untuk order ini.\n\n"
+            "Statistik dicatat otomatis saat status berubah.",
             parse_mode=ParseMode.HTML
         )
         return
@@ -195,7 +251,7 @@ async def cmd_sfood_metrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     done = event_times.get("done", 0)
 
     text = (
-        f"📊 <b>METRIK PERJALANAN</b>\n"
+        f"📊 <b>STATISTIK ORDER</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>{order['label']}</b>\n"
         f"🆔 <code>{order_id}</code>\n\n"
@@ -207,9 +263,9 @@ async def cmd_sfood_metrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if dur_pickup is not None:
         text += f"⏱️ <b>Durasi:</b>\n"
-        text += f"   • Konfirmasi → Pickup: {dur_pickup} menit\n"
+        text += f"   • Restoran siap → Kurir ambil: {dur_pickup} menit\n"
         if dur_delivery is not None:
-            text += f"   • Pickup → Sampai: {dur_delivery} menit\n"
+            text += f"   • Kurir ambil → Sampai: {dur_delivery} menit\n"
         if dur_total is not None:
             text += f"   • <b>Total: {dur_total} menit</b>\n"
         text += "\n"
@@ -227,7 +283,18 @@ async def cmd_sfood_metrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "done": "🏁",
             "cancelled": "❌",
         }.get(e["event"], "•")
-        text += f"   {icon} {ts_to_wib(e['timestamp'])} — {e['event']}\n"
+        label = {
+            "created": "Order dibuat",
+            "confirmed": "Restoran konfirmasi",
+            "preparing": "Restoran siapkan",
+            "picked_up": "Kurir ambil pesanan",
+            "in_transit": "Kurir jalan",
+            "arriving": "Kurir hampir tiba",
+            "arrived": "Pesanan sampai",
+            "done": "Selesai",
+            "cancelled": "Dibatalkan",
+        }.get(e["event"], e["event"])
+        text += f"   {icon} {ts_to_wib(e['timestamp'])} — {label}\n"
 
     text += f"\n⏰ Dibuat: {ts_to_wib(created)}\n"
     if done:
@@ -236,17 +303,21 @@ async def cmd_sfood_metrics(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def cmd_live_loc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ======================================================================
+# LOKASI SAYA
+# ======================================================================
+
+async def cmd_lokasi_saya(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
-        "📍 <b>Live Location</b>\n\n"
-        "Untuk tracking jarak ke driver, share <b>Live Location</b> kamu ke bot ini:\n\n"
+        "📍 <b>Share Lokasi Kamu</b>\n\n"
+        "Untuk tracking jarak ke kurir, share <b>Live Location</b> kamu ke bot:\n\n"
         "1. Tap ikon 📎 (attachment)\n"
         "2. Pilih <b>Location</b>\n"
         "3. Pilih <b>Share My Live Location</b>\n"
-        "4. Pilih durasi\n"
+        "4. Pilih durasi (mis: 15 menit)\n"
         "5. Kirim ke bot\n\n"
-        "Bot akan hitung jarak dari posisi kamu ke driver secara periodik.\n\n"
-        "<i>Catatan: Driver tidak expose GPS realtime. Jarak dihitung dari snapshot posisi terakhir driver.</i>"
+        "Bot akan hitung jarak dari kamu ke kurir secara periodik.\n\n"
+        "<i>Catatan: Bot hanya bisa hitung jarak berdasarkan data terakhir dari ShopeeFood. Real GPS kurir tidak tersedia untuk bot.</i>"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -283,7 +354,7 @@ async def handle_live_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not driver_lat or not driver_lng:
         await msg.reply_text(
             f"📍 Lokasi kamu: <code>{lat:.6f}, {lng:.6f}</code>\n\n"
-            f"⚠️ Posisi driver belum tersedia. Tunggu update berikutnya.",
+            f"⚠️ Posisi kurir belum tersedia. Tunggu update berikutnya.",
             parse_mode=ParseMode.HTML
         )
         return
@@ -291,10 +362,9 @@ async def handle_live_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     dist = haversine_distance(lat, lng, driver_lat, driver_lng)
     if dist is not None:
         text = (
-            f"📍 <b>Live Location Update</b>\n\n"
+            f"📍 <b>Jarak ke Kurir</b>\n\n"
             f"📦 {order['label']}\n"
-            f"🧑 Kamu: <code>{lat:.6f}, {lng:.6f}</code>\n"
-            f"🏍️ Driver: <code>{driver_lat:.6f}, {driver_lng:.6f}</code>\n"
-            f"📏 Jarak: <b>{dist:.2f} km</b>"
+            f"📏 Jarak: <b>{dist:.2f} km</b>\n"
+            f"🏍️ Posisi kurir: <code>{driver_lat:.4f}, {driver_lng:.4f}</code>"
         )
         await msg.reply_text(text, parse_mode=ParseMode.HTML)

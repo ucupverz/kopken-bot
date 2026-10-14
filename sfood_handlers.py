@@ -30,17 +30,17 @@ async def cmd_sfood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Corndog siang</code>\n\n"
         "<b>Fitur otomatis:</b>\n"
         "🚗 Update status realtime\n"
-        "🗺️ Map posisi driver & restoran\n"
-        "⚡ Notif saat driver hampir tiba\n"
+        "🗺️ Map posisi kurir & restoran\n"
+        "⚡ Notif saat kurir hampir tiba\n"
         "📸 Bukti pengiriman saat selesai\n"
-        "📡 Telemetri (proximity, stagnation, metrics)\n\n"
+        "📡 Pantau Kurir (alert dekat, stuck, statistik)\n\n"
         "<b>Commands:</b>\n"
         "/sfood — Menu ini\n"
         "/sfood_list — List order aktif\n"
         "/sfood_stop &lt;order_id&gt; — Stop 1 order\n"
         "/sfood_stopall — Stop semua order\n"
-        "/telemetry — Setelan telemetri\n"
-        "/sfood_metrics &lt;order_id&gt; — Metrik perjalanan"
+        "/telemetry — Menu Pantau Kurir\n"
+        "/sfood_metrics &lt;order_id&gt; — Statistik order"
     )
     await update.message.reply_text(
         text,
@@ -66,11 +66,11 @@ async def cmd_sfood_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"• <code>{o['order_id']}</code>\n"
             f"  📦 {o['label']}\n"
             f"  Status: {o['last_status_text'] or '-'}\n"
-            f"  ETA: {o['last_eta'] or '-'}\n"
+            f"  Estimasi tiba: {o['last_eta'] or '-'}\n"
         )
     lines.append("\nStop 1 order: <code>/sfood_stop &lt;order_id&gt;</code>")
     lines.append("Stop semua: <code>/sfood_stopall</code>")
-    lines.append("Metrik: <code>/sfood_metrics &lt;order_id&gt;</code>")
+    lines.append("Statistik: <code>/sfood_metrics &lt;order_id&gt;</code>")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
@@ -142,7 +142,7 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not label:
         label = parsed["store_name"]
 
-    # Cek jumlah order user SEBELUM tambah (untuk deteksi first time)
+    # Cek jumlah order user SEBELUM tambah
     with db.get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT COUNT(*) as cnt FROM sfood_orders WHERE user_id = ?", (user.id,))
@@ -188,8 +188,8 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📦 Label: {label}\n"
         f"🏪 Restoran: {parsed['store_name']}\n"
         f"🚗 Status: {parsed['status_text']}\n"
-        f"⏱️ ETA: {parsed['eta_text']}\n"
-        f"🧑 Driver: {parsed['driver_name']}\n"
+        f"⏱️ Estimasi tiba: {parsed['eta_text']}\n"
+        f"🧑 Kurir: {parsed['driver_name']}\n"
         f"📞 HP: <code>{parsed['driver_phone']}</code>\n"
         f"🏍️ Plat: {parsed['driver_plate']}\n\n"
         f"Aku akan kirim notif setiap ada perubahan status.\n"
@@ -198,31 +198,31 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     print(f"[SFOOD] ✅ New order tracked: {order_id} by user {user.id}")
 
-    # === INFO TELEMETRI (KALAU FIRST TIME) ===
+    # === INFO PANTAU KURIR (KALAU FIRST TIME) ===
     if prev_count == 0:
         info_text = (
-            "📡 <b>Tips: Fitur Telemetri Tersedia!</b>\n"
+            "💡 <b>Fitur Tambahan: Pantau Kurir</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Bot bisa bantu tracking lebih canggih:\n\n"
-            "🚨 <b>Proximity Alert</b>\n"
-            "   Notif + map saat driver dekat lokasi kamu\n\n"
-            "⚠️ <b>Stagnation Detector</b>\n"
-            "   Alert kalau kurir lama tidak bergerak\n\n"
-            "📊 <b>Metrik Perjalanan</b>\n"
-            "   Analisis durasi & timeline order\n\n"
-            "📍 <b>Live Location</b>\n"
-            "   Share lokasi kamu, bot hitung jarak ke driver\n\n"
+            "Biar makin gampang pantau pesanan:\n\n"
+            "🚨 <b>Alert Kurir Dekat</b>\n"
+            "   Bot kasih notif + map saat kurir dekat lokasi kamu\n\n"
+            "⏸️ <b>Alert Kurir Stuck</b>\n"
+            "   Bot kasih tau kalau kurir diam lama\n\n"
+            "📊 <b>Statistik Order</b>\n"
+            "   Info durasi & timeline pesanan kamu\n\n"
+            "📍 <b>Lokasi Saya</b>\n"
+            "   Share lokasi, bot hitung jarak ke kurir\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "<b>Commands:</b>\n"
             "<code>/telemetry</code> — Menu lengkap\n"
-            "<code>/telemetry_on proximity</code> — Aktifkan\n"
-            "<code>/telemetry_off proximity</code> — Matikan\n"
-            "<code>/proximity_set 1.5</code> — Ubah threshold\n"
-            "<code>/sfood_metrics &lt;order_id&gt;</code> — Cek metrik\n"
-            "<code>/live_loc</code> — Share lokasi\n\n"
-            "<i>💡 Default: Proximity ON (1km), Stagnation ON (15 menit).</i>"
+            "<code>/pantau_on dekat</code> — Aktifkan Alert Dekat\n"
+            "<code>/pantau_off dekat</code> — Matikan\n"
+            "<code>/jarak_set 1.5</code> — Ubah jarak (km)\n"
+            "<code>/sfood_metrics &lt;order_id&gt;</code> — Statistik\n"
+            "<code>/lokasi_saya</code> — Share lokasi\n\n"
+            "<i>💡 Default: Alert Dekat (1 km), Alert Stuck (15 menit).</i>"
         )
         try:
             await update.message.reply_text(info_text, parse_mode=ParseMode.HTML)
         except Exception as e:
-            print(f"[SFOOD] ❌ Gagal kirim telemetri info: {e}")
+            print(f"[SFOOD] ❌ Gagal kirim info: {e}")
