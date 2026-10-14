@@ -6,7 +6,6 @@ from contextlib import contextmanager
 
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
-# Auto-create folder kalau belum ada
 _db_dir = os.path.dirname(DB_PATH)
 if _db_dir and not os.path.exists(_db_dir):
     try:
@@ -87,6 +86,36 @@ def init_db():
                 biaya INTEGER,
                 jam INTEGER,
                 timestamp INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_telemetry (
+                user_id INTEGER PRIMARY KEY,
+                proximity_enabled INTEGER DEFAULT 1,
+                proximity_km REAL DEFAULT 1.0,
+                stagnation_enabled INTEGER DEFAULT 1,
+                stagnation_min INTEGER DEFAULT 15,
+                live_loc_enabled INTEGER DEFAULT 0,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT,
+                event TEXT,
+                value INTEGER,
+                note TEXT,
+                timestamp INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_stagnation (
+                order_id TEXT PRIMARY KEY,
+                last_status INTEGER,
+                last_change_at INTEGER,
+                alerted_at INTEGER
             )
         """)
         conn.commit()
@@ -384,18 +413,15 @@ def sfood_stop_all_user(user_id):
 
 
 # ----------------------------------------------------------------------
-# SHOPEEFOOD ADMIN / LEADERBOARD
+# SHOPEEFOOD ADMIN
 # ----------------------------------------------------------------------
 
 def sfood_list_all_users():
-    """List semua user yang pernah pakai ShopeeFood Tracker."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
             SELECT 
-                u.user_id,
-                u.username,
-                u.first_name,
+                u.user_id, u.username, u.first_name,
                 COUNT(DISTINCT so.order_id) as total_orders,
                 COUNT(DISTINCT CASE WHEN so.active = 1 THEN so.order_id END) as active_orders,
                 MAX(so.created_at) as last_order_at
@@ -408,27 +434,18 @@ def sfood_list_all_users():
 
 
 def sfood_get_user_history(user_id, limit=20):
-    """Ambil history order ShopeeFood user."""
     with get_conn() as conn:
         c = conn.cursor()
-        c.execute("""
-            SELECT * FROM sfood_orders
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (user_id, limit))
+        c.execute("SELECT * FROM sfood_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
         return c.fetchall()
 
 
 def sfood_get_leaderboard(limit=20):
-    """Leaderboard user ShopeeFood berdasarkan total order."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
             SELECT 
-                u.user_id,
-                u.username,
-                u.first_name,
+                u.user_id, u.username, u.first_name,
                 COUNT(DISTINCT so.order_id) as total_orders,
                 SUM(CASE WHEN so.active = 1 THEN 1 ELSE 0 END) as active_count,
                 MAX(so.created_at) as last_order_at
@@ -442,7 +459,6 @@ def sfood_get_leaderboard(limit=20):
 
 
 def sfood_get_global_stats():
-    """Statistik global ShopeeFood Tracker."""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT COUNT(DISTINCT user_id) as total FROM sfood_orders")
@@ -462,7 +478,7 @@ def sfood_get_global_stats():
 
 
 # ----------------------------------------------------------------------
-# TARIF SHOPEEFOOD
+# TARIF
 # ----------------------------------------------------------------------
 
 def tarif_add(user_id, biaya):
@@ -535,3 +551,87 @@ def tarif_get_stats():
             "cheapest": cheapest_hours,
             "expensive": expensive_hours,
         }
+
+
+# ----------------------------------------------------------------------
+# TELEMETRY
+# ----------------------------------------------------------------------
+
+def tel_get_settings(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_telemetry WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        if not row:
+            now = int(time.time())
+            c.execute("""
+                INSERT INTO sfood_telemetry (user_id, created_at, updated_at)
+                VALUES (?, ?, ?)
+            """, (user_id, now, now))
+            conn.commit()
+            c.execute("SELECT * FROM sfood_telemetry WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+        return row
+
+
+def tel_update_settings(user_id, **kwargs):
+    allowed = ["proximity_enabled", "proximity_km",
+               "stagnation_enabled", "stagnation_min", "live_loc_enabled"]
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return False
+    now = int(time.time())
+    fields = ", ".join(f"{k} = ?" for k in updates.keys())
+    values = list(updates.values()) + [now, user_id]
+    with get_conn() as conn:
+        c = conn.cursor()
+        tel_get_settings(user_id)
+        c.execute(f"UPDATE sfood_telemetry SET {fields}, updated_at = ? WHERE user_id = ?", values)
+        conn.commit()
+        return True
+
+
+def stag_get(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_stagnation WHERE order_id = ?", (order_id,))
+        return c.fetchone()
+
+
+def stag_set(order_id, last_status, last_change_at):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_stagnation (order_id, last_status, last_change_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(order_id) DO UPDATE SET
+                last_status = excluded.last_status,
+                last_change_at = excluded.last_change_at,
+                alerted_at = NULL
+        """, (order_id, last_status, last_change_at))
+        conn.commit()
+
+
+def stag_mark_alerted(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sfood_stagnation SET alerted_at = ? WHERE order_id = ?",
+                  (int(time.time()), order_id))
+        conn.commit()
+
+
+def metrics_add(order_id, event, value=0, note=""):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_metrics (order_id, event, value, note, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+        """, (order_id, event, value, note, int(time.time())))
+        conn.commit()
+
+
+def metrics_get(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_metrics WHERE order_id = ? ORDER BY timestamp ASC", (order_id,))
+        return c.fetchall()
