@@ -1,8 +1,12 @@
 import asyncio
+from io import BytesIO
+
+from telegram import InputFile
 
 import database as db
 from sfood_client import fetch_tracking, parse_tracking
 from sfood_config import SFOOD_POLL_INTERVAL
+from map_generator import generate_map_driver_resto, generate_map_single
 
 
 def fmt_gmaps_link(lat, lng):
@@ -20,22 +24,19 @@ def fmt_gmaps_link(lat, lng):
 
 
 def build_maps_section(data):
-    """Bangun section peta dari data koordinat."""
+    """Bangun section peta (link Google Maps) dari data koordinat."""
     links = []
 
-    # 1. Driver (posisi terakhir diketahui)
     if data.get("driver_lat") and data.get("driver_lng"):
         link = fmt_gmaps_link(data["driver_lat"], data["driver_lng"])
         if link:
             links.append(f"   🚗 <a href='{link}'>Posisi Driver</a>")
 
-    # 2. Restoran
     if data.get("store_lat") and data.get("store_lng"):
         link = fmt_gmaps_link(data["store_lat"], data["store_lng"])
         if link:
             links.append(f"   🏪 <a href='{link}'>Lokasi Restoran</a>")
 
-    # 3. Alamat pengiriman
     if data.get("deliv_lat") and data.get("deliv_lng"):
         link = fmt_gmaps_link(data["deliv_lat"], data["deliv_lng"])
         if link:
@@ -117,6 +118,40 @@ def fmt_cancelled(order, data):
     )
 
 
+async def send_map(bot, user_id, parsed, caption=""):
+    """Generate + kirim map image kalau koordinat tersedia."""
+    driver_lat = parsed.get("driver_lat")
+    driver_lng = parsed.get("driver_lng")
+    store_lat = parsed.get("store_lat")
+    store_lng = parsed.get("store_lng")
+
+    # Skip kalau tidak ada koordinat
+    if not (driver_lat or store_lat):
+        return
+
+    try:
+        bio = None
+
+        if driver_lat and store_lat:
+            # 2 pin: driver + resto
+            bio = generate_map_driver_resto(driver_lat, driver_lng, store_lat, store_lng)
+        elif driver_lat:
+            # 1 pin: driver saja
+            bio = generate_map_single(driver_lat, driver_lng)
+        elif store_lat:
+            # 1 pin: restoran saja
+            bio = generate_map_single(store_lat, store_lng)
+
+        if bio:
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=InputFile(bio, filename="map.png"),
+                caption=caption or "🗺️ Peta lokasi"
+            )
+    except Exception as e:
+        print(f"[SFOOD] ❌ Map error: {e}")
+
+
 async def check_one_order(bot, order):
     order_id = order["order_id"]
     code = order["code"]
@@ -159,6 +194,11 @@ async def check_one_order(bot, order):
     # === HAMPIR TIBA ===
     if parsed["is_arriving"]:
         if order.get("last_flag") != "arriving":
+            # Kirim map dulu
+            await send_map(bot, user_id, parsed,
+                           caption=f"⚡ Driver hampir tiba: {parsed.get('driver_name') or '-'}")
+
+            # Kirim teks notif
             text = fmt_arriving(order, parsed)
             try:
                 await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
@@ -172,6 +212,11 @@ async def check_one_order(bot, order):
 
     # === PERUBAHAN STATUS ===
     if current_status != last_status:
+        # Kirim map dulu (kalau ada koordinat baru)
+        await send_map(bot, user_id, parsed,
+                       caption=f"🗺️ Update: {parsed.get('status_text') or '-'}")
+
+        # Kirim teks notif
         text = fmt_status_update(order, parsed)
         try:
             await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
