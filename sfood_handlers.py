@@ -3,7 +3,11 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 import database as db
-from sfood_client import parse_tracker_url, fetch_tracking, parse_tracking
+from sfood_client import (
+    parse_tracker_url, fetch_tracking, parse_tracking,
+    fetch_tracking_auto, is_shptools_url,
+)
+from sfood_shptools import parse_shptools_url
 from map_generator import generate_map_driver_resto, generate_map_single
 
 
@@ -19,15 +23,16 @@ async def cmd_sfood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🍔 <b>ShopeeFood Tracker</b>\n\n"
         "Aku bisa lacak pesanan ShopeeFood kamu realtime.\n\n"
         "<b>Cara pakai:</b>\n"
-        "1. Buka app ShopeeFood → halaman tracking order\n"
-        "2. Tap <b>Bagikan</b> → Copy link\n"
-        "3. Kirim link ke bot ini\n\n"
+        "1. Copy link pesanan dari:\n"
+        "   • App ShopeeFood (tombol <b>Bagikan</b>)\n"
+        "   • Atau dari <b>shptools.my.id</b>\n"
+        "2. Kirim link ke bot ini\n\n"
         "<b>Format:</b>\n"
         "<code>&lt;URL&gt; &lt;label opsional&gt;</code>\n\n"
-        "<b>Contoh:</b>\n"
-        "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy</code>\n"
-        "atau\n"
-        "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Corndog siang</code>\n\n"
+        "<b>Contoh ShopeeFood:</b>\n"
+        "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy</code>\n\n"
+        "<b>Contoh shptools:</b>\n"
+        "<code>https://shptools.my.id/sfood?view=orders&amp;id=330...</code>\n\n"
         "<b>Fitur otomatis:</b>\n"
         "🚗 Update status realtime\n"
         "🗺️ Map posisi kurir & restoran\n"
@@ -39,8 +44,7 @@ async def cmd_sfood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/sfood_list — List order aktif\n"
         "/sfood_stop &lt;order_id&gt; — Stop 1 order\n"
         "/sfood_stopall — Stop semua order\n"
-        "/telemetry — Menu Pantau Kurir\n"
-        "/sfood_metrics &lt;order_id&gt; — Statistik order"
+        "/telemetry — Menu Pantau Kurir"
     )
     await update.message.reply_text(
         text,
@@ -106,17 +110,30 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     user = update.effective_user
 
-    if "shopeefood.co.id/tracker" not in text:
+    # Deteksi sumber: ShopeeFood atau shptools
+    is_shopeefood = "shopeefood.co.id/tracker" in text
+    is_shptools = "shptools.my.id/sfood" in text
+
+    if not (is_shopeefood or is_shptools):
         return
 
     parts = text.split(maxsplit=1)
     url = parts[0]
     label = parts[1].strip() if len(parts) > 1 else None
 
-    order_id, code = parse_tracker_url(url)
-    if not order_id or not code:
+    # Extract order_id
+    if is_shptools:
+        order_id = parse_shptools_url(url)
+        code = "shptools"
+    else:
+        order_id, code = parse_tracker_url(url)
+
+    if not order_id:
         await update.message.reply_text(
-            "❌ Link tidak valid. Pastikan link dari tombol <b>Bagikan</b> di app ShopeeFood.",
+            "❌ Link tidak valid.\n\n"
+            "Pastikan link dari:\n"
+            "• App ShopeeFood (tombol <b>Bagikan</b>)\n"
+            "• Shptools.my.id (halaman order)",
             parse_mode=ParseMode.HTML
         )
         return
@@ -129,15 +146,19 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("🔍 Verifikasi link...")
-    data = await fetch_tracking(order_id, code)
-    if not data:
-        await msg.edit_text("❌ Gagal akses link tracker. Pastikan link masih valid.")
+
+    # Fetch otomatis dari sumber manapun
+    parsed, order_id_ret, code_or_source = await fetch_tracking_auto(url)
+
+    if not parsed:
+        await msg.edit_text(
+            "❌ Gagal akses link tracker.\n\n"
+            "Pastikan link valid. Kalau dari shptools, cek login masih aktif."
+        )
         return
 
-    parsed = parse_tracking(data)
-    if not parsed:
-        await msg.edit_text("❌ Tidak bisa baca data tracking.")
-        return
+    if order_id_ret:
+        order_id = order_id_ret
 
     if not label:
         label = parsed["store_name"]
@@ -196,9 +217,9 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Order ID: <code>{order_id}</code>",
         parse_mode=ParseMode.HTML
     )
-    print(f"[SFOOD] ✅ New order tracked: {order_id} by user {user.id}")
+    print(f"[SFOOD] ✅ New order tracked: {order_id} by user {user.id} (source: {'shptools' if is_shptools else 'shopee'})")
 
-    # === INFO PANTAU KURIR (KALAU FIRST TIME) ===
+    # Info Pantau Kurir kalau first time
     if prev_count == 0:
         info_text = (
             "💡 <b>Fitur Tambahan: Pantau Kurir</b>\n"

@@ -3,13 +3,17 @@ import re
 from datetime import datetime, timezone, timedelta
 
 from sfood_config import SFOOD_API_HEADERS, SFOOD_API_BASE
+from sfood_shptools import (
+    fetch_order_detail as shptools_fetch_order,
+    fetch_driver_location as shptools_fetch_driver,
+    parse_shptools_response,
+    parse_shptools_url,
+)
 
 
-# Timezone WIB (UTC+7)
 WIB = timezone(timedelta(hours=7))
 
 
-# Mapping status kode → deskripsi
 STATUS_MAP = {
     100: "Order baru masuk",
     110: "Menunggu konfirmasi restoran",
@@ -40,18 +44,14 @@ def parse_tracker_url(url: str):
     """Extract order_id + code dari URL tracker ShopeeFood."""
     if not url:
         return None, None
-
     m = re.search(r"orderId=(\d+)", url)
     order_id = m.group(1) if m else None
-
     m = re.search(r"[?&]code=([^&\s]+)", url)
     code = m.group(1) if m else None
-
     return order_id, code
 
 
 def ts_to_str(ts):
-    """Convert timestamp (ms) ke string waktu WIB."""
     if not ts or ts == "0" or ts == 0:
         return "-"
     try:
@@ -62,7 +62,6 @@ def ts_to_str(ts):
 
 
 def _pick_coord(*candidates):
-    """Ambil koordinat pertama yang bukan 0,0 dari list candidate."""
     for c in candidates:
         if not c or not isinstance(c, dict):
             continue
@@ -79,7 +78,6 @@ def _pick_coord(*candidates):
 async def fetch_tracking(order_id: str, code: str):
     """Hit API ShopeeFood tracking."""
     url = f"{SFOOD_API_BASE}/{order_id}/tracing/{code}"
-
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(url, headers=SFOOD_API_HEADERS)
@@ -97,7 +95,7 @@ async def fetch_tracking(order_id: str, code: str):
 
 
 def parse_tracking(data: dict):
-    """Extract field penting dari response API."""
+    """Extract field penting dari response API ShopeeFood."""
     if not data:
         return None
 
@@ -107,15 +105,11 @@ def parse_tracking(data: dict):
     driver = delivery.get("driver") or {}
     store = order.get("store") or {}
 
-    # Extract status
     status_code = order.get("status", 0)
     delivery_status = deliv_order.get("delivery_status", 0)
     enroute_status = deliv_order.get("enroute_status", 0)
 
-    # Cari status text dari mapping
     status_text = STATUS_MAP.get(status_code)
-
-    # Fallback: tebak dari delivery_status / enroute_status
     if not status_text:
         if enroute_status >= 300:
             status_text = "Pesanan sampai"
@@ -136,7 +130,6 @@ def parse_tracking(data: dict):
         else:
             status_text = f"Status {status_code}"
 
-    # Extract ETA
     eta_obj = order.get("display_estimate_delivered_time")
     eta_text = "-"
     if eta_obj and isinstance(eta_obj, dict):
@@ -145,46 +138,35 @@ def parse_tracking(data: dict):
         if eta_min and eta_max:
             eta_text = f"{ts_to_str(eta_min).split(' ')[-1]} - {ts_to_str(eta_max).split(' ')[-1]}"
 
-    # Extract driver
     driver_name = driver.get("full_name") or "-"
     driver_phone = driver.get("phone") or "-"
     driver_plate = driver.get("vehicle_plate_no") or "-"
     driver_rating = driver.get("rating_score") or "-"
 
-    # Extract store
     store_name = store.get("name") or "-"
 
-    # Extract items
     items = order.get("items", [])
     item_count = sum((it.get("cart_item") or {}).get("quantity", 0) for it in items)
 
-    # Extract total
     total_amount = order.get("amount", {}).get("total_amount", "0")
     try:
         total_rp = int(total_amount) // 100000
     except Exception:
         total_rp = 0
 
-    # Complete time
     complete_time = deliv_order.get("complete_time", "0")
 
-    # Extract bukti pengiriman (foto dari driver)
     complete_certs = deliv_order.get("complete_certs") or []
     pickup_certs = deliv_order.get("pickup_certs") or []
     proof_urls = []
-
-    # Ambil foto dari complete_certs (bukti antar)
     for cert in complete_certs:
         if isinstance(cert, dict) and cert.get("image_url"):
             proof_urls.append(cert["image_url"])
-
-    # Kalau complete_certs kosong, ambil pickup_certs (foto ambil pesanan)
     if not proof_urls:
         for cert in pickup_certs:
             if isinstance(cert, dict) and cert.get("image_url"):
                 proof_urls.append(cert["image_url"])
 
-    # Flags — deteksi lebih agresif
     is_arriving = (enroute_status == 200 or status_code in (440, 445))
     is_done = (
         (complete_time and str(complete_time) != "0") or
@@ -194,7 +176,6 @@ def parse_tracking(data: dict):
     )
     is_cancelled = status_code == 999
 
-    # === EXTRACT KOORDINAT ===
     geo = deliv_order.get("geo_tracking") or {}
     driver_lat, driver_lng = _pick_coord(
         geo.get("complete_geo"),
@@ -226,11 +207,63 @@ def parse_tracking(data: dict):
         "is_done": is_done,
         "is_cancelled": is_cancelled,
         "proof_urls": proof_urls,
-        # Koordinat
         "driver_lat": driver_lat,
         "driver_lng": driver_lng,
         "store_lat": store_lat,
         "store_lng": store_lng,
         "deliv_lat": deliv_lat,
         "deliv_lng": deliv_lng,
+        "_source": "shopee",
     }
+
+
+# ======================================================================
+# ROUTING — MULTI SOURCE
+# ======================================================================
+
+def is_shptools_url(url: str) -> bool:
+    """Cek apakah link dari shptools.my.id."""
+    return "shptools.my.id" in (url or "")
+
+
+async def fetch_tracking_auto(url: str):
+    """
+    Fetch tracking otomatis dari sumber mana pun.
+    Return: (parsed_data, order_id, source_or_code)
+    """
+    if is_shptools_url(url):
+        order_id = parse_shptools_url(url)
+        if not order_id:
+            return None, None, None
+
+        order_data = await shptools_fetch_order(order_id)
+        if not order_data:
+            return None, None, None
+
+        driver_data = await shptools_fetch_driver(order_id)
+        parsed = parse_shptools_response(order_data, driver_data)
+        return parsed, order_id, "shptools"
+
+    else:
+        order_id, code = parse_tracker_url(url)
+        if not order_id or not code:
+            return None, None, None
+
+        data = await fetch_tracking(order_id, code)
+        if not data:
+            return None, None, None
+
+        parsed = parse_tracking(data)
+        return parsed, order_id, code
+
+
+async def fetch_tracking_by_id(order_id: str, source: str = "shptools"):
+    """Fetch tracking by order_id saja (untuk polling)."""
+    if source == "shptools":
+        order_data = await shptools_fetch_order(order_id)
+        if not order_data:
+            return None
+        driver_data = await shptools_fetch_driver(order_id)
+        return parse_shptools_response(order_data, driver_data)
+    else:
+        return None

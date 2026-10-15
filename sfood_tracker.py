@@ -4,7 +4,7 @@ from io import BytesIO
 from telegram import InputFile
 
 import database as db
-from sfood_client import fetch_tracking, parse_tracking
+from sfood_client import fetch_tracking, parse_tracking, fetch_tracking_by_id
 from sfood_config import SFOOD_POLL_INTERVAL
 from map_generator import generate_map_driver_resto, generate_map_single
 from sfood_telemetry import haversine_distance
@@ -272,14 +272,20 @@ async def check_one_order(bot, order):
     user_id = order["user_id"]
     last_status = order["last_status"]
 
-    data = await fetch_tracking(order_id, code)
-    if not data:
-        print(f"[SFOOD] ⚠️ Gagal fetch order {order_id}")
-        return
-
-    parsed = parse_tracking(data)
-    if not parsed:
-        return
+    # Routing: shptools pakai API shptools, lainnya ShopeeFood
+    if code == "shptools":
+        parsed = await fetch_tracking_by_id(order_id, source="shptools")
+        if not parsed:
+            print(f"[SFOOD] ⚠️ Gagal fetch shptools order {order_id}")
+            return
+    else:
+        data = await fetch_tracking(order_id, code)
+        if not data:
+            print(f"[SFOOD] ⚠️ Gagal fetch order {order_id}")
+            return
+        parsed = parse_tracking(data)
+        if not parsed:
+            return
 
     current_status = parsed["status_code"]
 
