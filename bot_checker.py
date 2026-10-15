@@ -177,7 +177,7 @@ async def handle_message(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
 
-    if "shopeefood.co.id/tracker" in text:
+    if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
         await handle_sfood_message(update, ctx)
         return
 
