@@ -64,7 +64,7 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_le
     detik = time_left % 60
     
     if status == "Menunggu OTP":
-        status_line = f"⏳ Status: <b>Menunggu OTP</b> ({menit:02d}:{detik:02d})"
+        status_line = f"⏳ Status: <b>Menunggu OTP</b> (<b>{menit:02d}:{detik:02d}</b>)"
         otp_line = ""
     elif status == "Selesai":
         status_line = f"✅ Status: <b>Selesai</b>"
@@ -186,6 +186,23 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
+        # === FITUR AUTO PROMO KOPKEN (Ini yang lu minta) ===
+        if "kopken" in service_name.lower() and "filter" not in service_name.lower():
+            cek = await nasky_cek_single(ph)
+            if not cek.get("success"):
+                # Jika MT / Error
+                promo_txt = (
+                    f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
+                    f"Lu ga perlu pusing, lu bisa langsung pakai nomor <code>{ph}</code> ini.\n"
+                    f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!"
+                )
+                await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML)
+            else:
+                # Jika Nasky Normal, kasih tombol cek
+                promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya sekarang?\n(Biaya Rp 200 jika FRESH, GRATIS jika sudah terdaftar)."
+                cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{ph}")]])
+                await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
+        
     else:
         await update.message.reply_text(
             f"💰 Saldo Anda: Rp {saldo:,}\n"
@@ -204,7 +221,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(10) # Update tiap 10 detik biar ga kena limit
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
@@ -222,7 +239,6 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
             pass
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
-    # Cek dari DB aja (fix error bot_data)
     db_order = db.get_otp_order(order_id)
     if not db_order or db_order['status'] != 'waiting':
         return 
