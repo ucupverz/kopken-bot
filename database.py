@@ -133,6 +133,16 @@ def init_db():
                 created_at INTEGER
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS deposits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount INTEGER,
+                qris_url TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at INTEGER
+            )
+        """)
         # Migration: add saldo column if upgrading from old DB
         try:
             c.execute("ALTER TABLE users ADD COLUMN saldo INTEGER DEFAULT 0")
@@ -248,7 +258,7 @@ def get_all_user_ids():
 
 
 # ----------------------------------------------------------------------
-# SALDO
+# SALDO & DEPOSIT
 # ----------------------------------------------------------------------
 
 def add_saldo(user_id, amount):
@@ -268,6 +278,34 @@ def deduct_saldo(user_id, amount):
         c.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
         conn.commit()
         return True
+
+def create_deposit(user_id, amount, qris_url):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO deposits (user_id, amount, qris_url, status, created_at)
+            VALUES (?, ?, ?, 'pending', ?)
+        """, (user_id, amount, qris_url, int(time.time())))
+        conn.commit()
+        return c.lastrowid
+
+def get_deposit(deposit_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM deposits WHERE id = ?", (deposit_id,))
+        return c.fetchone()
+
+def update_deposit_status(deposit_id, status):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE deposits SET status = ? WHERE id = ?", (status, deposit_id))
+        conn.commit()
+
+def get_pending_deposits():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM deposits WHERE status = 'pending' ORDER BY created_at DESC")
+        return c.fetchall()
 
 
 # ----------------------------------------------------------------------

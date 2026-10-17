@@ -32,7 +32,9 @@ from sfood_telemetry import (
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
 from otp_handlers import (
     cmd_otp_menu, handle_buy_callback, handle_cancel_callback, 
-    handle_all_services, handle_back_menu, poll_otp_bg
+    handle_all_services, handle_back_menu, poll_otp_bg,
+    handle_direct_buy, process_direct_buy, cmd_deposit, process_deposit,
+    otp_keyboard
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -106,13 +108,6 @@ def admin_keyboard():
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "🔧 Admin Panel"],
         ["❓ Bantuan"]
-    ], resize_keyboard=True)
-
-
-def otp_keyboard():
-    return ReplyKeyboardMarkup([
-        ["🛒 Shopee", "📱 Kopken"],
-        ["📋 Lihat Semua Layanan", "🔙 Kembali ke Menu"]
     ], resize_keyboard=True)
 
 
@@ -197,18 +192,27 @@ async def handle_message(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
 
+    # Cek State Percakapan (Direct Buy / Deposit)
+    if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
+        qty = int(text)
+        await process_direct_buy(update, ctx, qty)
+        return
+        
+    if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
+        amount = int(text)
+        await process_deposit(update, ctx, amount)
+        return
+
     if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
         await handle_sfood_message(update, ctx)
         return
 
-    # --- HANDLER KEYBOARD MENU UTAMA ---
+    # --- HANDLER MENU UTAMA ---
     if text == "☕ Cek Kopken":
         if u["quota"] <= 0:
             await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
         else:
-            await update.message.reply_text(
-                "Kirim nomor HP yang mau dicek, contoh:\n`081234567890`",
-                parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text("Kirim nomor HP yang mau dicek, contoh:\n`081234567890`", parse_mode=ParseMode.MARKDOWN)
         return
 
     if text == "📊 Kuota Saya":
@@ -218,31 +222,13 @@ async def handle_message(update, ctx):
     if text == "📱 WhatsApp OTP":
         await cmd_otp_menu(update, ctx)
         return
-
+        
     if text == "🔑 Pakai Kode VOC":
-        await update.message.reply_text("Kirim kode VOC kamu.\n\nFormat: `VOC-XXXXXX`",
-                                         parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Kirim kode VOC kamu.\n\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN)
         return
 
     if text == "🍔 ShopeeFood":
         await cmd_sfood(update, ctx)
-        return
-
-    if text == "🍔 Tambah Order":
-        await update.message.reply_text(
-            "Kirim link tracker ShopeeFood + label opsional.\n\n"
-            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Label</code>",
-            parse_mode=ParseMode.HTML)
-        return
-
-    if text == "📋 List Order":
-        await cmd_sfood_list(update, ctx)
-        return
-
-    if text == "❌ Stop Order":
-        await update.message.reply_text(
-            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall",
-            parse_mode=ParseMode.HTML)
         return
 
     if text == "📊 Tarif ShopeeFood":
@@ -266,7 +252,7 @@ async def handle_message(update, ctx):
         await cmd_admin(update, ctx)
         return
 
-    # --- HANDLER KEYBOARD DINAMIS OTP ---
+    # --- HANDLER MENU OTP (KEYBOARD BAWAH) ---
     if text == "🔙 Kembali ke Menu":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
         saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
@@ -275,75 +261,15 @@ async def handle_message(update, ctx):
             parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    if text == "📋 Lihat Semua Layanan":
-        services = await wahub_client.get_services()
-        if not services:
-            await update.message.reply_text("❌ Gagal mengambil daftar layanan.")
-            return
-            
-        keyboard = []
-        for s in services:
-            if s['stock'] > 0:
-                harga_jual = s['price'] + 1000 
-                btn_text = f"{s['name']} | Rp {harga_jual:,} (Stok: {s['stock']})"
-                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{s['name']}")])
-            else:
-                keyboard.append([InlineKeyboardButton(f"{s['name']} (Habis)", callback_data="otp_none")])
-                
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("📋 <b>Pilih Layanan:</b>", parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    if text == "💰 Deposit Saldo":
+        await cmd_deposit(update, ctx)
         return
         
-    if text in ["🛒 Shopee", "📱 Kopken"]:
-        nama_layanan = text.replace("🛒 ", "").replace("📱 ", "") 
-        services = await wahub_client.get_services()
-        
-        target_service = next((s for s in services if s['name'].lower() == nama_layanan.lower()), None)
-        
-        if not target_service:
-            await update.message.reply_text(f"❌ Layanan {nama_layanan} tidak ditemukan di API.")
-            return
-            
-        service_id = target_service['id']
-        harga_jual = target_service['price'] + 1000
-        service_name = target_service['name']
-        
-        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        if saldo < harga_jual:
-            await update.message.reply_text(f"❌ Saldo tidak cukup. Sisa: Rp {saldo:,}. Butuh: Rp {harga_jual:,}.")
-            return
-            
-        if not db.deduct_saldo(user.id, harga_jual):
-            await update.message.reply_text("❌ Gagal memotong saldo.")
-            return
-            
-        msg = await update.message.reply_text("⏳ Sedang menyewa nomor...")
-        
-        res, status_code = await wahub_client.rent_number(service_id)
-        if status_code != 200:
-            db.add_saldo(user.id, harga_jual)
-            error_msg = res.get('detail', res.get('message', 'Error sistem.'))
-            await msg.edit_text(f"❌ Gagal: {error_msg}\n\nSaldo dikembalikan.")
-            return
-            
-        order_id = res['order_id']
-        token = res['token']
-        phone = res['phone']
-        
-        db.create_otp_order(user.id, order_id, token, phone, service_name, harga_jual)
-        
-        text_msg = (
-            f"✅ <b>Nomor Berhasil Disewa!</b>\n\n"
-            f"📱 Layanan: {service_name}\n"
-            f"📞 Nomor: <code>{phone}</code>\n\n"
-            f"⏳ Silakan gunakan nomor ini. Bot otomatis mendeteksi kode (maks 2 menit)."
-        )
-        keyboard = [[InlineKeyboardButton("❌ Batalkan & Refund", callback_data=f"otp_cancel_{order_id}")]]
-        await msg.edit_text(text_msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-        
-        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, order_id, token, service_name))
+    if text in ["🛒 Kopken", "🛒 Kopken Filter", "🛒 Shopee", "🛒 Shopee Filter"]:
+        service_name = text.replace("🛒 ", "")
+        await handle_direct_buy(update, ctx, service_name)
         return
-    # --- END HANDLER KEYBOARD DINAMIS OTP ---
+    # --- END HANDLER MENU OTP ---
 
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
@@ -755,7 +681,7 @@ def main():
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
 
-    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
+    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_checkpay_"))
     app.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=r"^otp_cancel_"))
     app.add_handler(CallbackQueryHandler(handle_all_services, pattern=r"^otp_all$")) 
     app.add_handler(CallbackQueryHandler(handle_back_menu, pattern=r"^otp_back$"))   

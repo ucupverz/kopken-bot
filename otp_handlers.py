@@ -1,159 +1,162 @@
 import asyncio
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 import database as db
 import wahub_client
 
-# Sesuaikan dengan nama layanan persis seperti di API WAHub
-QUICK_SERVICES = ["Shopee", "Kopken", "WhatsApp", "Tokopedia"] 
+# Sesuaikan dengan nama persis di API WAHub
+QUICK_SERVICES = ["Kopken", "Kopken Filter", "Shopee", "Shopee Filter"] 
+MARGIN = 700
+
+# Link web dehuyz untuk pembayaran QRIS
+WAHUB_TOPUP_URL = "https://dehuyzotp.shop/dashboard" 
+
+def otp_keyboard():
+    return ReplyKeyboardMarkup([
+        ["🛒 Kopken", "🛒 Kopken Filter"],
+        ["🛒 Shopee", "🛒 Shopee Filter"],
+        ["💰 Deposit Saldo", "🔙 Kembali ke Menu"]
+    ], resize_keyboard=True)
 
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
     text = (
-        f"📱 <b>WhatsApp OTP</b>\n\n"
-        f"💰 Saldo Anda: <b>Rp {saldo:,}</b>\n\n"
-        f"Silakan pilih layanan cepat di bawah ini, atau klik <b>Lihat Semua Layanan</b> untuk melihat daftar lengkap."
+        f"📱 <b>Menu WhatsApp OTP</b>\n\n"
+        f"Silakan pilih layanan di keyboard bawah.\n"
+        f"• <b>Direct Buy</b>: Langsung bayar via QRIS sesuai jumlah nomor.\n"
+        f"• <b>Deposit</b>: Isi saldo dulu (min Rp 5.000), lalu beli."
     )
-    
-    services = await wahub_client.get_services()
-    if not services:
-        await update.message.reply_text("❌ Gagal mengambil daftar layanan. Coba lagi nanti.")
-        return
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=otp_keyboard())
 
-    keyboard = []
-    
-    # 1. Tampilkan Quick Services (Shopee, Kopken, dll)
-    for s in services:
-        if s['name'] in QUICK_SERVICES and s['stock'] > 0:
-            harga_jual = s['price'] + 1000 
-            btn_text = f"🛒 {s['name']} | Rp {harga_jual:,} (Stok: {s['stock']})"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{s['name']}")])
-            
-    # 2. Tombol Lihat Semua Layanan
-    keyboard.append([InlineKeyboardButton("📋 Lihat Semua Layanan", callback_data="otp_all")])
-            
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-
-async def handle_all_services(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
+async def handle_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, service_name: str):
     user = update.effective_user
-    u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    
-    text = (
-        f"📋 <b>Semua Layanan OTP</b>\n\n"
-        f"💰 Saldo Anda: <b>Rp {saldo:,}</b>\n\n"
-        f"Pilih layanan yang ingin dibeli:"
+    await update.message.reply_text(
+        f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
+        parse_mode=ParseMode.HTML,
+        reply_markup=None # Hilangkan keyboard sementara
     )
-    
-    services = await wahub_client.get_services()
-    if not services:
-        await query.edit_message_text("❌ Gagal mengambil daftar layanan.")
+    ctx.user_data['buy_service'] = service_name
+    ctx.user_data['buy_state'] = 'WAITING_QTY'
+
+async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
+    user = update.effective_user
+    service_name = ctx.user_data.get('buy_service')
+    if not service_name:
         return
         
-    keyboard = []
-    for s in services:
-        if s['stock'] > 0:
-            harga_jual = s['price'] + 1000 
-            btn_text = f"{s['name']} | Rp {harga_jual:,} (Stok: {s['stock']})"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{s['name']}")])
-        else:
-            keyboard.append([InlineKeyboardButton(f"{s['name']} (Habis)", callback_data="otp_none")])
-            
-    # Tombol kembali ke menu utama
-    keyboard.append([InlineKeyboardButton("🔙 Kembali", callback_data="otp_back")])
-            
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-
-async def handle_back_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    # Panggil ulang cmd_otp_menu tapi edit pesannya
-    user = update.effective_user
-    u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+    services = await wahub_client.get_services()
+    target_service = next((s for s in services if s['name'].lower() == service_name.lower()), None)
+    
+    if not target_service:
+        await update.message.reply_text("❌ Layanan tidak ditemukan.")
+        ctx.user_data.clear()
+        return
+        
+    harga_satuan = target_service['price'] + MARGIN
+    total = harga_satuan * qty
+    
+    ctx.user_data['buy_qty'] = qty
+    ctx.user_data['buy_total'] = total
+    ctx.user_data['buy_id'] = target_service['id']
     
     text = (
-        f"📱 <b>WhatsApp OTP</b>\n\n"
-        f"💰 Saldo Anda: <b>Rp {saldo:,}</b>\n\n"
-        f"Silakan pilih layanan cepat di bawah ini, atau klik <b>Lihat Semua Layanan</b>."
+        f"🧾 <b>Detail Pembelian</b>\n\n"
+        f"Layanan: {service_name}\n"
+        f"Jumlah: {qty} nomor\n"
+        f"Harga: Rp {harga_satuan:,}/nomor\n"
+        f"<b>Total: Rp {total:,}</b>\n\n"
+        f"Silakan scan QRIS di link bawah. Setelah bayar, klik <b>Saya Sudah Bayar</b>."
     )
     
-    services = await wahub_client.get_services()
-    if not services:
-        await query.edit_message_text("❌ Gagal mengambil daftar layanan.")
-        return
+    keyboard = [
+        [InlineKeyboardButton("💳 Buka Halaman QRIS", url=WAHUB_TOPUP_URL)],
+        [InlineKeyboardButton("✅ Saya Sudah Bayar", callback_data=f"otp_checkpay_{qty}_{total}")]
+    ]
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    keyboard = []
-    for s in services:
-        if s['name'] in QUICK_SERVICES and s['stock'] > 0:
-            harga_jual = s['price'] + 1000 
-            btn_text = f"🛒 {s['name']} | Rp {harga_jual:,} (Stok: {s['stock']})"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{s['name']}")])
-            
-    keyboard.append([InlineKeyboardButton("📋 Lihat Semua Layanan", callback_data="otp_all")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "💰 <b>Deposit Saldo OTP</b>\n\n"
+        "Minimal deposit Rp 5.000.\n"
+        "Ketik jumlah deposit yang diinginkan (contoh: 10000):"
+    )
+    ctx.user_data['deposit_state'] = 'WAITING_AMOUNT'
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=None)
+
+async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount: int):
+    if amount < 5000:
+        await update.message.reply_text("❌ Minimal deposit Rp 5.000.")
+        return
+        
+    qris_link = f"{WAHUB_TOPUP_URL}?amount={amount}" 
+    
+    text = (
+        f"🧾 <b>Deposit Saldo</b>\n\n"
+        f"Jumlah: <b>Rp {amount:,}</b>\n\n"
+        f"Silakan scan QRIS di link bawah ini. Setelah bayar, tunggu 1-5 menit, saldo otomatis masuk."
+    )
+    
+    keyboard = [[InlineKeyboardButton("💳 Buka Halaman Pembayaran QRIS", url=qris_link)]]
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user = update.effective_user
     
-    data_parts = query.data.split("_")
-    if len(data_parts) < 4 or data_parts[1] == "none":
-        return
+    data = query.data
+    
+    if data.startswith("otp_checkpay_"):
+        parts = data.split("_")
+        qty = int(parts[2])
+        total = int(parts[3])
+        service_name = ctx.user_data.get('buy_service')
+        service_id = ctx.user_data.get('buy_id')
         
-    service_id = int(data_parts[2])
-    harga_jual = int(data_parts[3])
-    service_name = data_parts[4]
-    
-    u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    
-    if saldo < harga_jual:
-        await query.edit_message_text(f"❌ Saldo tidak cukup. Sisa saldo: Rp {saldo:,}. Minimal butuh Rp {harga_jual:,}.")
-        return
+        if not service_id:
+            await query.edit_message_text("❌ Sesi pembelian habis. Silakan ulangi.")
+            return
+            
+        await query.edit_message_text("⏳ Memverifikasi pembayaran dan menyewa nomor...")
         
-    if not db.deduct_saldo(user.id, harga_jual):
-        await query.edit_message_text("❌ Gagal memotong saldo. Coba lagi.")
-        return
+        numbers_bought = []
+        for _ in range(qty):
+            res, status_code = await wahub_client.rent_number(service_id)
+            if status_code == 200:
+                order_id = res['order_id']
+                token = res['token']
+                phone = res['phone']
+                
+                db.create_otp_order(query.from_user.id, order_id, token, phone, service_name, total // qty)
+                numbers_bought.append((order_id, token, phone))
+            else:
+                await query.edit_message_text("❌ Gagal menyewa nomor. Saldo provider mungkin habis atau pembayaran belum masuk.")
+                return
+                
+        text = f"✅ <b>Pembelian Berhasil!</b>\n\n"
+        text += f"Layanan: {service_name}\n"
+        for i, (oid, tkn, ph) in enumerate(numbers_bought, 1):
+            text += f"{i}. Nomor: <code>{ph}</code>\n"
+        text += f"\nSilakan gunakan nomor ini. OTP akan dikirim otomatis."
         
-    await query.edit_message_text("⏳ Sedang menyewa nomor...")
-    
-    res, status_code = await wahub_client.rent_number(service_id)
-    if status_code != 200:
-        db.add_saldo(user.id, harga_jual)
-        error_msg = res.get('detail', res.get('message', 'Stok habis atau error sistem.'))
-        await query.edit_message_text(f"❌ Gagal menyewa nomor: {error_msg}\n\nSaldo Anda telah dikembalikan.")
-        return
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
         
-    order_id = res['order_id']
-    token = res['token']
-    phone = res['phone']
-    
-    db.create_otp_order(user.id, order_id, token, phone, service_name, harga_jual)
-    
-    text = (
-        f"✅ <b>Nomor Berhasil Disewa!</b>\n\n"
-        f"📱 Layanan: {service_name}\n"
-        f"📞 Nomor: <code>{phone}</code>\n\n"
-        f"⏳ Silakan gunakan nomor ini untuk menerima OTP. Bot akan otomatis mendeteksi kode yang masuk (maks 2 menit)."
-    )
-    
-    keyboard = [[InlineKeyboardButton("❌ Batalkan & Refund", callback_data=f"otp_cancel_{order_id}")]]
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    asyncio.create_task(poll_otp_bg(ctx.bot, user.id, order_id, token, service_name))
+        for oid, tkn, ph in numbers_bought:
+            asyncio.create_task(poll_otp_bg(ctx.bot, query.from_user.id, oid, tkn, service_name))
+            
+        ctx.user_data.clear()
+
+async def handle_all_services(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Fitur lihat semua layanan bisa ditambahkan nanti.")
+
+async def handle_back_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Kembali ke menu...")
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name):
     res, status = await wahub_client.check_otp(token, timeout=60)
