@@ -21,7 +21,8 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH, handle_ganti_nomor, handle_cancel_order
+    BIAYA_CEK_FRESH, handle_ganti_nomor, handle_cancel_order,
+    handle_order_action_callback
 )
 
 from sfood_handlers import (
@@ -651,6 +652,7 @@ def main():
     bot_app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
     bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act_"))
     bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
