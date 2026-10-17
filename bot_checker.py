@@ -21,7 +21,7 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH
+    BIAYA_CEK_FRESH, handle_ganti_nomor
 )
 
 from sfood_handlers import (
@@ -284,6 +284,10 @@ async def handle_message(update, ctx):
             await update.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
         else:
             await update.message.reply_text("❌ Gagal minta ulang OTP. Mungkin batas retry habis atau waktu sewa habis.")
+        return
+    
+    if text == "🔄 Ganti Nomor":
+        await handle_ganti_nomor(update, ctx)
         return
 
     text_upper = text.upper()

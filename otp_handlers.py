@@ -153,7 +153,10 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         oid, tkn, ph = numbers_bought[0]
         ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": total}
         
-        order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]], resize_keyboard=True)
+        order_kb = ReplyKeyboardMarkup([
+    ["❌ Batal & Refund", "🔄 Ganti Nomor"],  # <-- UBAH DISINI
+    ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]
+], resize_keyboard=True)
         
         await ctx.bot.send_message(
             chat_id=user.id, 
@@ -332,3 +335,60 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id):
 async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
+
+async def handle_ganti_nomor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    last_order = ctx.user_data.get('last_order')
+    
+    if not last_order:
+        await update.message.reply_text("❌ Tidak ada pesanan aktif untuk diganti.")
+        return
+        
+    order_id_lama = last_order['order_id']
+    service_name = last_order['service']
+    harga = last_order['price']
+    
+    # Cek stok provider
+    services = await wahub_client.get_services()
+    target_service = next((s for s in services if s['name'].lower() == service_name.lower()), None)
+    
+    if not target_service or target_service['stock'] < 1:
+        await update.message.reply_text(f"❌ Maaf, stok {service_name} lagi kosong. Coba lagi nanti.")
+        return
+
+    await update.message.reply_text("⏳ Membatalkan nomor lama & memproses nomor baru...")
+    
+    # 1. Batalkan nomor lama
+    cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
+    if cxl_code != 200:
+        # Kalau gagal cancel, tetep lanjut aja (kadang API suka error padahal nomor udah expired)
+        pass
+        
+    # 2. Minta nomor baru
+    res, code = await wahub_client.rent_number(target_service['id'])
+    
+    if code == 200 and res.get('order_id'):
+        new_oid = res['order_id']
+        new_tkn = res.get('token')
+        new_ph = res.get('phone')
+        
+        # Simpan ke DB
+        db.create_otp_order(user.id, new_oid, new_tkn, new_ph, service_name, harga)
+        
+        # Update last_order di memory
+        ctx.user_data['last_order'] = {"order_id": new_oid, "token": new_tkn, "phone": new_ph, "service": service_name, "price": harga}
+        
+        txt = (
+            f"✅ <b>Nomor Berhasil Diganti!</b>\n\n"
+            f"📱 Layanan: {service_name}\n"
+            f"📞 Nomor Baru: <code>{new_ph}</code>\n"
+            f"🆔 Order ID: <code>{new_oid}</code>\n\n"
+            f"<i>Nomor lama telah dibatalkan. Silakan gunakan nomor baru ini.</i>"
+        )
+        await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+        
+        # Jalanin polling buat nomor baru
+        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, service_name, update.message.message_id))
+        
+    else:
+        await update.message.reply_text("❌ Gagal mendapatkan nomor baru dari provider. Saldo Anda aman.")
