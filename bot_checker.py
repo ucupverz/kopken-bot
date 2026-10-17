@@ -17,7 +17,7 @@ import database as db
 import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
-    handle_direct_buy, cmd_deposit, otp_keyboard
+    cmd_deposit, otp_keyboard, handle_cekstatus_callback
 )
 
 from sfood_handlers import (
@@ -282,8 +282,7 @@ async def handle_message(update, ctx):
         return
         
     if text.startswith("🛒 "):
-        # Ambil nama layanan dengan membuang emoji dan angka stok di ujung
-        # Contoh string: "🛒 Kopken (484)" -> jadi "Kopken"
+        import re
         service_name = re.sub(r"\s*\(\d+\)$", "", text.replace("🛒 ", ""))
         
         await update.message.reply_text(
@@ -294,7 +293,6 @@ async def handle_message(update, ctx):
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
-    # --- END HANDLER MENU OTP ---
 
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
@@ -307,6 +305,7 @@ async def handle_message(update, ctx):
             await update.message.reply_text(f"❌ {message}")
         return
 
+    # Sisa logika cek nomor dan lainnya...
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     if len(lines) == 1 and is_valid_phone(lines[0]):
@@ -706,17 +705,8 @@ def main():
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
 
-    app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
-    # ... (kode handler lainnya) ...
-    app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
-
-    # 👇 TARUH KODE BARU DI SINI 👇
-    from otp_handlers import handle_cekstatus_callback
+    # Handler untuk Cek Status QRIS
     app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
-    # 👆 SAMPAI SINI 👆
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -724,6 +714,7 @@ def main():
 
     print("🤖 Bot jalan... Ctrl+C untuk stop")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
