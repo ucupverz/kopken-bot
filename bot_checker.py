@@ -6,8 +6,9 @@ import string
 import re
 import time
 import httpx
-from flask import Flask, request, jsonify
-import threading
+from fastapi import FastAPI, Request, Response
+from contextlib import asynccontextmanager
+import uvicorn
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -20,7 +21,7 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH, poll_otp_bg
+    BIAYA_CEK_FRESH
 )
 
 from sfood_handlers import (
@@ -43,15 +44,12 @@ NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
 NASKY_BASE = "https://nasky.web.id"
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 DEFAULT_VOC_QUOTA = int(os.getenv("DEFAULT_VOC_QUOTA", "3"))
+WEBHOOK_URL = "https://okezones-bot.up.railway.app"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- GLOBAL UNTUK WEBHOOK & FLASK ---
-flask_app = Flask(__name__)
-bot_application = None
-bot_loop = None
-msg_id_cache = {} # Nyimpen msg_id buat update UI 1 Box
+bot_app = None
 
 def is_admin(user_id): return user_id in ADMIN_IDS
 
@@ -147,7 +145,13 @@ async def cmd_kuota(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    await update.message.reply_text(f"📊 *Kuota Kamu*\n\nSisa kuota: *{u['quota']}x cek*\nTotal cek: {u['total_cek']}x\n💰 Saldo OTP: *Rp {saldo:,}*", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"📊 *Kuota Kamu*\n\n"
+        f"Sisa kuota: *{u['quota']}x cek*\n"
+        f"Total cek: {u['total_cek']}x\n"
+        f"💰 Saldo OTP: *Rp {saldo:,}*",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def handle_message(update, ctx):
     text = (update.message.text or "").strip()
@@ -157,7 +161,6 @@ async def handle_message(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
 
-    # Cek State Percakapan (Direct Buy / Deposit)
     if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
         qty = int(text)
         await process_direct_buy(update, ctx, qty)
@@ -172,7 +175,6 @@ async def handle_message(update, ctx):
         await handle_sfood_message(update, ctx)
         return
 
-    # --- HANDLER MENU UTAMA ---
     if text == "☕ Cek Kopken":
         if u["quota"] <= 0: await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
         else: await update.message.reply_text("Kirim nomor HP yang mau dicek, contoh:\n`081234567890`", parse_mode=ParseMode.MARKDOWN)
@@ -218,7 +220,6 @@ async def handle_message(update, ctx):
         await cmd_admin(update, ctx)
         return
 
-    # --- HANDLER MENU OTP (KEYBOARD BAWAH) ---
     if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
         saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
@@ -233,38 +234,23 @@ async def handle_message(update, ctx):
         if ctx.user_data.get('is_processing'):
             await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
             return
-            
         last_order = ctx.user_data.get('last_order')
         if not last_order:
             await update.message.reply_text("❌ Tidak ada pesanan aktif.")
             return
-            
         status = "Menunggu OTP"
-        if last_order.get('status') == 'success':
-            status = "Selesai (OTP Diterima)"
-        
-        msg = (
-            f"📋 <b>Detail Pesanan Aktif</b>\n\n"
-            f"Layanan: {last_order['service']}\n"
-            f"Nomor: <code>{last_order['phone']}</code>\n"
-            f"Status: {status}\n\n"
-            f"Gunakan tombol Batal atau Kirim Ulang OTP jika diperlukan."
-        )
+        if last_order.get('status') == 'success': status = "Selesai (OTP Diterima)"
+        msg = f"📋 <b>Detail Pesanan Aktif</b>\n\nLayanan: {last_order['service']}\nNomor: <code>{last_order['phone']}</code>\nStatus: {status}"
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
         return
 
     if text.startswith("🛒 "):
-        # Ambil nama layanan dengan memisahkan dari format "🛒 Nama (Stok) - Harga"
         match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
         service_name = match.group(1).strip() if match else None
-        
         if not service_name:
             await update.message.reply_text("❌ Format tombol tidak dikenali. Silakan klik ulang dari menu WhatsApp OTP.")
             return
-
-        # Kembalikan keyboard OTP agar user ga nyasar
         kb_otp = await get_otp_keyboard()
-        
         await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
@@ -275,10 +261,8 @@ async def handle_message(update, ctx):
         if not last_order:
             await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
             return
-            
         ctx.bot_data[f"poll_{last_order['order_id']}"] = False
         res, code = await wahub_client.cancel_order(last_order['order_id'])
-        
         if code == 200:
             refund_amount = last_order.get('price', 0)
             db.add_saldo(user.id, refund_amount)
@@ -306,9 +290,7 @@ async def handle_message(update, ctx):
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
         success, message, quota = db.use_voc(text_upper, user.id)
         if success:
-            await update.message.reply_text(
-                f"✅ *{message}*\n\nSekarang kamu punya *{db.get_user(user.id)['quota']}x* kuota.",
-                parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"✅ *{message}*\n\nSekarang kamu punya *{db.get_user(user.id)['quota']}x* kuota.", parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text(f"❌ {message}")
         return
@@ -418,48 +400,35 @@ async def handle_message(update, ctx):
         return
 
     await update.message.reply_text("❌ Format tidak dikenali.")
-
-# --- CALLBACK HANDLERS ---
+    
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = update.effective_user
-    
     data_parts = query.data.split("_")
-    if len(data_parts) < 4 or data_parts[1] == "none":
-        return
-        
+    if len(data_parts) < 4 or data_parts[1] == "none": return
     service_id = int(data_parts[2])
     harga_jual = int(data_parts[3])
     service_name = data_parts[4]
-    
     ctx.user_data['buy_service'] = service_name
     ctx.user_data['buy_qty'] = 1
     ctx.user_data['buy_total'] = harga_jual
     ctx.user_data['buy_id'] = service_id
-    
-    await query.edit_message_text(
-        f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
-        parse_mode=ParseMode.HTML
-    )
+    await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML)
     ctx.user_data['buy_state'] = 'WAITING_QTY'
 
 async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     phone = query.data.split("_")[2]
     user = update.effective_user
     u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    
     await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
-    
     result = await nasky_cek_single(phone)
     if not result.get("success"):
         await query.edit_message_text(f"❌ Gagal cek: {result.get('detail', 'Unknown')}")
         return
-        
     d = result["data"]
     if d["status"] == "fresh":
         if saldo < 200:
@@ -471,40 +440,22 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {d.get('customer_name') or '-'}\n\n💳 Cek GRATIS."
     else:
         reply = f"❓ Status tidak dikenal: `{d['status']}`"
-        
     await query.edit_message_text(reply, parse_mode=ParseMode.MARKDOWN)
 
-# --- ADMIN COMMANDS ---
 async def cmd_admin(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    text = (
-        f"🔧 *Admin Panel*\n\n"
-        f"👥 Total users: {s['total_users']}\n"
-        f"☕ Total cek: {s['total_cek']}\n"
-        f"🔑 VOC aktif: {s['active_voc']}\n"
-        f"🔑 Total VOC: {s['total_voc']}\n\n"
-        f"*Generate VOC:* `/genvoc` `[kuota]` `[kode]`\n\n"
-        f"*ShopeeFood Admin:*\n"
-        f"`/sfood_users` — List user\n"
-        f"`/sfood_leaderboard` — Leaderboard\n"
-        f"`/sfood_userinfo <id>` — Detail user\n\n"
-        f"*Kelola:* `/revoke <kode>` `/addkuota <id> <n>` `/addsaldo <id> <n>`"
-    )
+    text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n🔑 VOC aktif: {s['active_voc']}\n🔑 Total VOC: {s['total_voc']}\n\n*Generate VOC:* `/genvoc` `[kuota]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addkuota <id> <n>` `/addsaldo <id> <n>`"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_genvoc(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     args = ctx.args or []
     if not args:
         for _ in range(10):
             code = gen_voc_code()
             if db.create_voc(code, DEFAULT_VOC_QUOTA, update.effective_user.id):
-                await update.message.reply_text(
-                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{DEFAULT_VOC_QUOTA}x*",
-                    parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{DEFAULT_VOC_QUOTA}x*", parse_mode=ParseMode.MARKDOWN)
                 return
         return
     if len(args) == 1 and args[0].isdigit():
@@ -512,42 +463,26 @@ async def cmd_genvoc(update, ctx):
         for _ in range(10):
             code = gen_voc_code()
             if db.create_voc(code, quota, update.effective_user.id):
-                await update.message.reply_text(
-                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{quota}x*",
-                    parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{quota}x*", parse_mode=ParseMode.MARKDOWN)
                 return
         return
     if len(args) == 1:
         custom = sanitize_voc_input(args[0])
-        if not custom:
-            await update.message.reply_text("❌ Kode tidak valid.")
-            return
-        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id):
-            await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {DEFAULT_VOC_QUOTA}x",
-                                             parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
+        if not custom: await update.message.reply_text("❌ Kode tidak valid."); return
+        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {DEFAULT_VOC_QUOTA}x", parse_mode=ParseMode.MARKDOWN)
+        else: await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
         return
     if len(args) >= 2:
         custom = sanitize_voc_input(args[0])
-        if not custom or not args[1].isdigit():
-            await update.message.reply_text("❌ Format: `/genvoc <KODE> <KUOTA>`",
-                                             parse_mode=ParseMode.MARKDOWN)
-            return
+        if not custom or not args[1].isdigit(): await update.message.reply_text("❌ Format: `/genvoc <KODE> <KUOTA>`", parse_mode=ParseMode.MARKDOWN); return
         quota = int(args[1])
-        if db.create_voc(custom, quota, update.effective_user.id):
-            await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {quota}x",
-                                             parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
+        if db.create_voc(custom, quota, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {quota}x", parse_mode=ParseMode.MARKDOWN)
+        else: await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
 
 async def cmd_listvoc(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     rows = db.list_voc_codes(20)
-    if not rows:
-        await update.message.reply_text("Belum ada kode VOC.")
-        return
+    if not rows: await update.message.reply_text("Belum ada kode VOC."); return
     lines = ["🔑 *20 Kode VOC Terakhir*\n"]
     for r in rows:
         status = "🟢" if r["active"] else "🔴"
@@ -555,72 +490,40 @@ async def cmd_listvoc(update, ctx):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_revoke(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/revoke <kode>`", parse_mode=ParseMode.MARKDOWN)
-        return
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Usage: `/revoke <kode>`", parse_mode=ParseMode.MARKDOWN); return
     db.revoke_voc(ctx.args[0].upper())
-    await update.message.reply_text(f"✅ Kode `{ctx.args[0].upper()}` dinonaktifkan.",
-                                     parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ Kode `{ctx.args[0].upper()}` dinonaktifkan.", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_addkuota(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/addkuota <id> <n>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0])
-        amt = int(ctx.args[1])
-    except ValueError:
-        return
-    if not db.get_user(uid):
-        await update.message.reply_text("❌ User tidak ditemukan.")
-        return
+    if not is_admin(update.effective_user.id): return
+    if len(ctx.args) < 2: await update.message.reply_text("Usage: `/addkuota <id> <n>`", parse_mode=ParseMode.MARKDOWN); return
+    try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
+    except ValueError: return
+    if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
     db.add_quota(uid, amt)
     new_q = db.get_user(uid)["quota"]
-    await update.message.reply_text(f"✅ Kuota user `{uid}` +{amt}. Total: {new_q}x",
-                                     parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ Kuota user `{uid}` +{amt}. Total: {new_q}x", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_addsaldo(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/addsaldo <id> <n>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0])
-        amt = int(ctx.args[1])
-    except ValueError:
-        return
-    if not db.get_user(uid):
-        await update.message.reply_text("❌ User tidak ditemukan.")
-        return
+    if not is_admin(update.effective_user.id): return
+    if len(ctx.args) < 2: await update.message.reply_text("Usage: `/addsaldo <id> <n>`", parse_mode=ParseMode.MARKDOWN); return
+    try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
+    except ValueError: return
+    if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
     db.add_saldo(uid, amt)
     new_s = db.get_user(uid)["saldo"]
-    await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}",
-                                     parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_stats(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    await update.message.reply_text(
-        f"📊 *Statistik*\n\n"
-        f"👥 Users: {s['total_users']}\n"
-        f"☕ Total cek: {s['total_cek']}\n"
-        f"🔑 VOC aktif: {s['active_voc']}\n"
-        f"🔑 VOC total: {s['total_voc']}",
-        parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📊 *Statistik*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n🔑 VOC aktif: {s['active_voc']}\n🔑 VOC total: {s['total_voc']}", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_users(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     users = db.list_all_users(limit=50)
-    if not users:
-        await update.message.reply_text("Belum ada user.")
-        return
+    if not users: await update.message.reply_text("Belum ada user."); return
     import datetime as dtmod
     lines = [f"👥 *Total Users: {len(users)}*\n"]
     for u in users:
@@ -632,110 +535,82 @@ async def cmd_users(update, ctx):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_userinfo(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/userinfo <id>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0])
-    except ValueError:
-        return
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Usage: `/userinfo <id>`", parse_mode=ParseMode.MARKDOWN); return
+    try: uid = int(ctx.args[0])
+    except ValueError: return
     user, vocs = db.get_user_detail(uid)
-    if not user:
-        await update.message.reply_text(f"❌ User `{uid}` tidak ditemukan.")
-        return
+    if not user: await update.message.reply_text(f"❌ User `{uid}` tidak ditemukan."); return
     import datetime as dtmod
     dt = dtmod.datetime.fromtimestamp(user['created_at']).strftime("%d/%m/%Y %H:%M")
     uname = f"@{user['username']}" if user['username'] else "(no uname)"
     saldo = user['saldo'] if user and 'saldo' in user.keys() else 0
-    text = (
-        f"👤 *Detail User*\n\n"
-        f"ID: `{user['user_id']}`\n"
-        f"Username: {uname}\n"
-        f"Nama: {user['first_name'] or '-'}\n\n"
-        f"📊 Kuota: *{user['quota']}x*\n"
-        f"💰 Saldo OTP: *Rp {saldo:,}*\n"
-        f"☕ Total cek: {user['total_cek']}x\n"
-        f"📅 Daftar: {dt}\n\n"
-    )
+    text = f"👤 *Detail User*\n\nID: `{user['user_id']}`\nUsername: {uname}\nNama: {user['first_name'] or '-'}\n\n📊 Kuota: *{user['quota']}x*\n💰 Saldo OTP: *Rp {saldo:,}*\n☕ Total cek: {user['total_cek']}x\n📅 Daftar: {dt}\n\n"
     if vocs:
         text += f"🔑 *VOC dipakai ({len(vocs)}):*\n"
-        for v in vocs:
-            text += f"• `{v['code']}` — {v['quota']}x\n"
-    else:
-        text += "🔑 Belum pernah redeem VOC."
+        for v in vocs: text += f"• `{v['code']}` — {v['quota']}x\n"
+    else: text += "🔑 Belum pernah redeem VOC."
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_vocdetail(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/vocdetail <kode>`", parse_mode=ParseMode.MARKDOWN)
-        return
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Usage: `/vocdetail <kode>`", parse_mode=ParseMode.MARKDOWN); return
     code = ctx.args[0].upper()
     voc, user = db.get_voc_detail(code)
-    if not voc:
-        await update.message.reply_text(f"❌ Kode `{code}` tidak ditemukan.")
-        return
+    if not voc: await update.message.reply_text(f"❌ Kode `{code}` tidak ditemukan."); return
     import datetime as dtmod
     dt = dtmod.datetime.fromtimestamp(voc['created_at']).strftime("%d/%m/%Y %H:%M")
-    text = (
-        f"🔑 *Detail Kode VOC*\n\n"
-        f"Kode: `{voc['code']}`\n"
-        f"Kuota: {voc['quota']}x\n"
-        f"Dibuat: {dt}\n"
-        f"Status: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n\n"
-    )
+    text = f"🔑 *Detail Kode VOC*\n\nKode: `{voc['code']}`\nKuota: {voc['quota']}x\nDibuat: {dt}\nStatus: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n\n"
     if user:
         used_at = dtmod.datetime.fromtimestamp(voc['used_at']).strftime("%d/%m/%Y %H:%M") if voc['used_at'] else "-"
         uname = f"@{user['username']}" if user['username'] else "(no uname)"
-        text += (
-            f"👤 *Dipakai oleh:*\n"
-            f"Nama: {user['first_name'] or '-'}\n"
-            f"Username: {uname}\n"
-            f"User ID: `{user['user_id']}`\n"
-            f"Redeem: {used_at}"
-        )
-    else:
-        text += "👤 Belum dipakai siapa pun."
+        text += f"👤 *Dipakai oleh:*\nNama: {user['first_name'] or '-'}\nUsername: {uname}\nUser ID: `{user['user_id']}`\nRedeem: {used_at}"
+    else: text += "👤 Belum dipakai siapa pun."
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
 
 async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global bot_app
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram-webhook", drop_pending_updates=True)
+    print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
+    asyncio.create_task(tracker_worker(bot_app.bot))
+    print("[SFOOD] Tracker worker started")
+    yield
+    await bot_app.stop()
+    await bot_app.shutdown()
 
-# --- ROUTE WEBHOOK DEHUYZ ---
-@flask_app.route('/wahub-webhook', methods=['POST'])
-def wahub_webhook():
-    data = request.json
+api_app = FastAPI(lifespan=lifespan)
+
+@api_app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return Response(status_code=200)
+
+@api_app.post("/wahub-webhook")
+async def wahub_webhook(request: Request):
+    data = await request.json()
     print(f"[WEBHOOK] Menerima data: {data}")
-    
     order_id = str(data.get('order_id'))
     otp = data.get('otp')
-    
     if order_id and otp:
-        if bot_loop and bot_loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                process_webhook_otp(order_id, otp), 
-                bot_loop
-            )
-        return jsonify({"status": "success"}), 200
-        
-    return jsonify({"status": "ignored"}), 200
+        asyncio.create_task(process_webhook_otp(order_id, otp))
+        return {"status": "success"}
+    return {"status": "ignored"}
 
 async def process_webhook_otp(order_id, otp):
     order = db.get_otp_order(order_id)
     if not order:
         print(f"[WEBHOOK] Order {order_id} tidak ada di DB.")
         return
-        
     db.update_otp_order_status(order_id, 'success', otp)
     chat_id = order['user_id']
-    
-    msg_id = msg_id_cache.get(f"msg_{order_id}")
-    
     ui_text = (
         f"✅ <b>Pesanan Selesai</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -745,104 +620,51 @@ async def process_webhook_otp(order_id, otp):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
     )
-    
-    if msg_id:
-        try:
-            await bot_application.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            print(f"[WEBHOOK] Gagal edit pesan: {e}")
-    else:
-        await bot_application.bot.send_message(chat_id=chat_id, text=ui_text, parse_mode=ParseMode.HTML)
-
+    await bot_app.bot.send_message(chat_id=chat_id, text=ui_text, parse_mode=ParseMode.HTML)
 
 def main():
-    global bot_application, bot_loop
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN belum di-set")
-        return
-    if not NASKY_API_KEY:
-        print("❌ NASKY_API_KEY belum di-set")
-        return
-
+    global bot_app
+    if not BOT_TOKEN or not NASKY_API_KEY:
+        print("❌ BOT_TOKEN atau NASKY_API_KEY belum di-set"); return
     db.init_db()
-
-    async def post_init(app):
-        app.bot_data["admin_ids"] = ADMIN_IDS
-        asyncio.create_task(tracker_worker(app.bot))
-        print("[SFOOD] Tracker worker started")
-        
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
-        if domain:
-            url_webhook = f"https://{domain}/telegram-webhook"
-            await app.bot.set_webhook(url=url_webhook)
-            print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
-        else:
-            print("[TELEGRAM] ⚠️ RAILWAY_PUBLIC_DOMAIN belum di-set!")
-
-    # INI BARIS YANG TADI KEHAPUS
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    bot_application = app
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("kuota", cmd_kuota))
-
-    app.add_handler(CommandHandler("sfood", cmd_sfood))
-    app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
-    app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
-    app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
-    app.add_handler(CommandHandler("sfood_users", cmd_sfood_users))
-    app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
-    app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
-
-    app.add_handler(CommandHandler("telemetry", cmd_telemetry))
-    app.add_handler(CommandHandler("pantau_on", cmd_pantau_on))
-    app.add_handler(CommandHandler("pantau_off", cmd_pantau_off))
-    app.add_handler(CommandHandler("jarak_set", cmd_jarak_set))
-    app.add_handler(CommandHandler("stuck_set", cmd_stuck_set))
-    app.add_handler(CommandHandler("sfood_metrics", cmd_sfood_metrics))
-    app.add_handler(CommandHandler("lokasi_saya", cmd_lokasi_saya))
-
-    app.add_handler(CommandHandler("tarif", cmd_tarif))
-    app.add_handler(CommandHandler("tarif_cek", cmd_tarif_cek))
-    app.add_handler(CommandHandler("tarif_stats", cmd_tarif_stats))
-
-    app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(CommandHandler("genvoc", cmd_genvoc))
-    app.add_handler(CommandHandler("listvoc", cmd_listvoc))
-    app.add_handler(CommandHandler("revoke", cmd_revoke))
-    app.add_handler(CommandHandler("addkuota", cmd_addkuota))
-    app.add_handler(CommandHandler("addsaldo", cmd_addsaldo))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CommandHandler("users", cmd_users))
-    app.add_handler(CommandHandler("userinfo", cmd_userinfo))
-    app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
-
-    app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
-    app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
-    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
-
-    app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
-    # Jalanin Flask Server di background (Port 8080)
-    def run_flask():
-        flask_app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
-
-    threading.Thread(target=run_flask, daemon=True).start()
-    print("🌐 Web Server (Flask) jalan di port 8080")
-
-    # Jalanin Bot (Webhook Mode)
-    bot_loop = asyncio.get_event_loop()
-    print("🤖 Bot jalan dalam mode Webhook...")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=8080,
-        url_path="telegram-webhook",
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False
-    )
+    bot_app = Application.builder().token(BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", cmd_start))
+    bot_app.add_handler(CommandHandler("help", cmd_help))
+    bot_app.add_handler(CommandHandler("kuota", cmd_kuota))
+    bot_app.add_handler(CommandHandler("sfood", cmd_sfood))
+    bot_app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
+    bot_app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
+    bot_app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
+    bot_app.add_handler(CommandHandler("sfood_users", cmd_sfood_users))
+    bot_app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
+    bot_app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
+    bot_app.add_handler(CommandHandler("telemetry", cmd_telemetry))
+    bot_app.add_handler(CommandHandler("pantau_on", cmd_pantau_on))
+    bot_app.add_handler(CommandHandler("pantau_off", cmd_pantau_off))
+    bot_app.add_handler(CommandHandler("jarak_set", cmd_jarak_set))
+    bot_app.add_handler(CommandHandler("stuck_set", cmd_stuck_set))
+    bot_app.add_handler(CommandHandler("sfood_metrics", cmd_sfood_metrics))
+    bot_app.add_handler(CommandHandler("lokasi_saya", cmd_lokasi_saya))
+    bot_app.add_handler(CommandHandler("tarif", cmd_tarif))
+    bot_app.add_handler(CommandHandler("tarif_cek", cmd_tarif_cek))
+    bot_app.add_handler(CommandHandler("tarif_stats", cmd_tarif_stats))
+    bot_app.add_handler(CommandHandler("admin", cmd_admin))
+    bot_app.add_handler(CommandHandler("genvoc", cmd_genvoc))
+    bot_app.add_handler(CommandHandler("listvoc", cmd_listvoc))
+    bot_app.add_handler(CommandHandler("revoke", cmd_revoke))
+    bot_app.add_handler(CommandHandler("addkuota", cmd_addkuota))
+    bot_app.add_handler(CommandHandler("addsaldo", cmd_addsaldo))
+    bot_app.add_handler(CommandHandler("stats", cmd_stats))
+    bot_app.add_handler(CommandHandler("users", cmd_users))
+    bot_app.add_handler(CommandHandler("userinfo", cmd_userinfo))
+    bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
+    bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
+    bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("🌐 Web Server (FastAPI) jalan di port 8080")
+    uvicorn.run(api_app, host="0.0.0.0", port=8080, log_level="info")
 
 if __name__ == "__main__":
     main()

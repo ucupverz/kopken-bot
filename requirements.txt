@@ -4,3 +4,5 @@ staticmap==0.5.7
 Pillow==10.4.0
 telethon==1.34.0
 flask==3.0.3
+fastapi==0.111.0
+uvicorn==0.30.1
