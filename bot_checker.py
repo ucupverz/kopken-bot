@@ -274,11 +274,36 @@ async def handle_message(update, ctx):
         await cmd_deposit(update, ctx)
         return
         
-    if text.startswith("🛒 "):
-        match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+([\d,]+)", text)
-        service_name = match.group(1).strip() if match else re.sub(r"\s*\(\d+\)\s*-\s*[\d,]+$", "", text.replace("🛒 ", "")).strip()
+    if text == "📋 Cek Pesanan":
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
+            return
+        status = "Menunggu OTP"
+        if last_order.get('status') == 'success':
+            status = "Selesai (OTP Diterima)"
         
-        # Ambil keyboard OTP lagi biar ga nyangkut
+        msg = (
+            f"📋 <b>Detail Pesanan Aktif</b>\n\n"
+            f"Layanan: {last_order['service']}\n"
+            f"Nomor: <code>{last_order['phone']}</code>\n"
+            f"Status: {status}\n\n"
+            f"Gunakan tombol Batal atau Kirim Ulang OTP jika diperlukan."
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        return
+
+    # --- HANDLER DETEKSI TOMBOL LAYANAN (🛒) ---
+    if text.startswith("🛒 "):
+        # Regex ini lebih kuat buat nangkep nama layanan dengan spasi (misal: "Kopken Filter")
+        match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
+        service_name = match.group(1).strip() if match else None
+        
+        if not service_name:
+            await update.message.reply_text("❌ Format tombol tidak dikenali. Silakan klik ulang dari menu WhatsApp OTP.")
+            return
+
+        # Kembalikan keyboard OTP agar user ga nyasar
         kb_otp = await get_otp_keyboard()
         
         await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
@@ -292,25 +317,20 @@ async def handle_message(update, ctx):
             await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
             return
             
-        # 1. Matiin polling biar ga dobel refund
         ctx.bot_data[f"poll_{last_order['order_id']}"] = False
-        
         res, code = await wahub_client.cancel_order(last_order['order_id'])
+        
         if code == 200:
-            # 2. Ambil harga jual dari memori (bukan dari API)
             refund_amount = last_order.get('price', 0)
-            
             db.add_saldo(user.id, refund_amount)
             await update.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund_amount:,} telah dikembalikan.")
             ctx.user_data['last_order'] = None
-            
-            # Kembalikan keyboard ke menu OTP
             kb = await get_otp_keyboard()
             await update.message.reply_text("Menu OTP:", reply_markup=kb)
         else:
             await update.message.reply_text("❌ Gagal membatalkan pesanan. Mungkin waktu sewa habis.")
         return
-    
+
     if text == "🔄 Kirim Ulang OTP":
         last_order = ctx.user_data.get('last_order')
         if not last_order:
@@ -441,7 +461,7 @@ async def handle_message(update, ctx):
     await update.message.reply_text("❌ Format tidak dikenali.")
 
 
-# --- CALLBACK HANDLERS ---
+# --- HANDLERS CALLBACK (INLINE BUTTONS) ---
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()

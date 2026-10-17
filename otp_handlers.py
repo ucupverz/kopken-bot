@@ -28,7 +28,8 @@ async def get_otp_keyboard():
     return ReplyKeyboardMarkup([
         [format_btn("Kopken"), format_btn("Kopken Filter")],
         [format_btn("Shopee"), format_btn("Shopee Filter")],
-        ["💰 Deposit Saldo", "🔙 Kembali ke Menu"]
+        ["📋 Cek Pesanan", "💰 Deposit Saldo"],
+        ["🔙 Kembali ke Menu"]
     ], resize_keyboard=True)
 
 def build_all_services_inline(services):
@@ -86,11 +87,15 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         return
         
     services = await wahub_client.get_services()
+    # Validasi nama layanan persis
     target_service = next((s for s in services if s['name'].lower() == service_name.lower()), None)
     
     if not target_service:
-        await update.message.reply_text("❌ Layanan tidak ditemukan.")
+        await update.message.reply_text("❌ Layanan tidak ditemukan atau sedang tidak tersedia.")
         ctx.user_data.clear()
+        # Balikin keyboard
+        kb_bawah = await get_otp_keyboard()
+        await update.message.reply_text("Menu OTP:", reply_markup=kb_bawah)
         return
         
     harga_satuan = target_service['price'] + MARGIN
@@ -99,7 +104,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
-    # Kembalikan keyboard OTP
     kb_bawah = await get_otp_keyboard()
     
     if saldo >= total:
@@ -131,12 +135,11 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         oid, tkn, ph = numbers_bought[0]
         ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": total}
         
-        order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["🔙 Kembali ke Menu"]], resize_keyboard=True)
+        order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]], resize_keyboard=True)
         
         if "kopken" in service_name.lower():
             cek = await nasky_cek_single(ph)
             if not cek.get("success"):
-                # Jika API Nasky MT / Error
                 promo_txt = (
                     f"⚠️ <b>Gagal Cek Kopken (Sistem Maintenance)</b>\n\n"
                     f"Nomor <code>{ph}</code> bisa langsung dipakai.\n"
@@ -222,7 +225,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 oid, tkn, ph = numbers_bought[0]
                 ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": amount}
                 
-                order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["🔙 Kembali ke Menu"]], resize_keyboard=True)
+                order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]], resize_keyboard=True)
                 
                 if "kopken" in service_name.lower():
                     cek = await nasky_cek_single(ph)
