@@ -170,7 +170,8 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 numbers_bought.append((order_id, token, phone))
             else:
                 db.add_saldo(user.id, total)
-                await update.message.reply_text("❌ Gagal membuat pesanan (Stok habis / API error). Saldo Anda dikembalikan.", reply_markup=kb_bawah)
+                error_msg = res.get('error', res.get('message', 'Unknown error'))
+                await update.message.reply_text(f"❌ Gagal membuat pesanan. Server Dehuyz bilang: <b>{error_msg}</b>\n\nSaldo Anda dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
                 ctx.user_data['is_processing'] = False
                 ctx.user_data.clear()
                 return
