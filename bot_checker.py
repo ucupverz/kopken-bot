@@ -15,6 +15,10 @@ from telegram.constants import ParseMode
 
 import database as db
 import wahub_client
+from otp_handlers import (
+    cmd_otp_menu, process_direct_buy, process_deposit, 
+    handle_direct_buy, cmd_deposit, otp_keyboard
+)
 
 from sfood_handlers import (
     cmd_sfood, cmd_sfood_list, cmd_sfood_stop,
@@ -30,12 +34,6 @@ from sfood_telemetry import (
     cmd_sfood_metrics, cmd_lokasi_saya, handle_live_location
 )
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
-from otp_handlers import (
-    cmd_otp_menu, handle_buy_callback, handle_cancel_callback, 
-    handle_all_services, handle_back_menu, poll_otp_bg,
-    handle_direct_buy, process_direct_buy, cmd_deposit, process_deposit,
-    otp_keyboard
-)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
@@ -229,13 +227,6 @@ async def handle_message(update, ctx):
 
     if text == "🍔 ShopeeFood":
         await cmd_sfood(update, ctx)
-        return
-
-    if text == "🍔 Tambah Order":
-        await update.message.reply_text(
-            "Kirim link tracker ShopeeFood + label opsional.\n\n"
-            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Label</code>",
-            parse_mode=ParseMode.HTML)
         return
 
     if text == "📋 List Order":
@@ -705,11 +696,6 @@ def main():
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
-
-    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_checkpay_"))
-    app.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=r"^otp_cancel_"))
-    app.add_handler(CallbackQueryHandler(handle_all_services, pattern=r"^otp_all$")) 
-    app.add_handler(CallbackQueryHandler(handle_back_menu, pattern=r"^otp_back$"))   
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

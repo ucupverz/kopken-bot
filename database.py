@@ -755,3 +755,23 @@ def metrics_get(order_id):
         c = conn.cursor()
         c.execute("SELECT * FROM sfood_metrics WHERE order_id = ? ORDER BY timestamp ASC", (order_id,))
         return c.fetchall()
+
+    # ----------------------------------------------------------------------
+# OTOMASI DEHUYZ
+# ----------------------------------------------------------------------
+
+def update_deposit_status(deposit_id, status):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE deposits SET status = ? WHERE id = ?", (status, deposit_id))
+        conn.commit()
+
+def create_automated_deposit(user_id, amount):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO deposits (user_id, amount, qris_url, status, created_at)
+            VALUES (?, ?, 'qr_gen', 'pending', ?)
+        """, (user_id, amount, int(time.time())))
+        conn.commit()
+        return c.lastrowid
