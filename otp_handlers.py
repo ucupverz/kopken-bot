@@ -1,4 +1,6 @@
 import asyncio
+import httpx
+import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -9,7 +11,8 @@ import dehuyz_automation
 
 QUICK_SERVICES = ["Kopken", "Kopken Filter", "Shopee", "Shopee Filter"] 
 MARGIN = 700
-BIAYA_CEK_FRESH = 200
+NASKY_BASE = "https://nasky.web.id"
+NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
 
 async def get_otp_keyboard():
     services = await wahub_client.get_services()
@@ -45,6 +48,14 @@ def build_all_services_inline(services):
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
+async def nasky_cek_single(nomor):
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            r = await client.post(f"{NASKY_BASE}/api/cek", headers={"X-API-Key": NASKY_API_KEY}, json={"code": "kopken", "nomor": nomor})
+            return r.json()
+        except Exception as e:
+            return {"success": False, "detail": f"Network error: {e}"}
+
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = db.get_user(user.id)
@@ -60,7 +71,7 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         f"📱 <b>Menu WhatsApp OTP</b>\n\n"
         f"💰 Saldo Anda: <b>Rp {saldo:,}</b>\n\n"
-        f"Silakan pilih layanan dari list di bawah ini, atau dari keyboard bawah (layanan populer)."
+        f"Silakan pilih layanan dari list di bawah ini, atau dari keyboard bawah."
     )
     
     inline_kb = build_all_services_inline(services)
@@ -87,12 +98,15 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
+    # Kembalikan keyboard OTP
+    kb_bawah = await get_otp_keyboard()
+    
     if saldo >= total:
         if not db.deduct_saldo(user.id, total):
             await update.message.reply_text("❌ Gagal memotong saldo.")
             return
             
-        msg = await update.message.reply_text(f"⏳ Saldo cukup. Memproses pembelian {qty} nomor...", parse_mode=ParseMode.HTML)
+        msg = await update.message.reply_text(f"⏳ Saldo cukup. Memproses pembelian {qty} nomor...", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
         
         numbers_bought = []
         for _ in range(qty):
@@ -109,10 +123,9 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         txt = f"✅ <b>Pembelian Berhasil! Nomor Anda:</b>\n\n"
         for i, (oid, tkn, ph) in enumerate(numbers_bought, 1):
             txt += f"{i}. <code>{ph}</code>\n"
-            # Set status aktif buat polling
             ctx.bot_data[f"poll_{oid}"] = True
             asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name))
-        await msg.edit_text(txt, parse_mode=ParseMode.HTML)
+        await msg.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
         
         oid, tkn, ph = numbers_bought[0]
         ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": total}
@@ -120,18 +133,16 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["🔙 Kembali ke Menu"]], resize_keyboard=True)
         
         if "kopken" in service_name.lower():
-            # Cek apakah API Nasky lagi MT sebelum nampilin promo
             cek = await nasky_cek_single(ph)
             if not cek.get("success"):
-                # Kalau MT, arahkan ke Kopken Filter
+                # Jika API Nasky MT / Error
                 promo_txt = (
-                    f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
-                    f"Lu ga perlu pusing, lu bisa langsung pakai nomor <code>{ph}</code> ini.\n"
+                    f"⚠️ <b>Gagal Cek Kopken (Sistem Maintenance)</b>\n\n"
+                    f"Nomor <code>{ph}</code> bisa langsung dipakai.\n"
                     f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!"
                 )
                 await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML)
             else:
-                # Kalau API normal, kasih tombol promo
                 promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya? (Biaya Rp 200 jika FRESH)."
                 cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{ph}")]])
                 await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
@@ -143,7 +154,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             f"💰 Saldo Anda: Rp {saldo:,}\n"
             f"💸 Total Harga: Rp {total:,}\n\n"
             f"Saldo tidak cukup. Silakan bayar via QRIS di bawah ini untuk melanjutkan.", 
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML, reply_markup=kb_bawah
         )
         ctx.user_data['buy_qty'] = qty
         ctx.user_data['buy_total'] = total
@@ -216,8 +227,8 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     cek = await nasky_cek_single(ph)
                     if not cek.get("success"):
                         promo_txt = (
-                            f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
-                            f"Lu bisa langsung pakai nomor <code>{ph}</code> ini.\n"
+                            f"⚠️ <b>Gagal Cek Kopken (Sistem Maintenance)</b>\n\n"
+                            f"Nomor <code>{ph}</code> bisa langsung dipakai.\n"
                             f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!"
                         )
                         await bot.send_message(chat_id=chat_id, text=promo_txt, parse_mode=ParseMode.HTML)
@@ -231,7 +242,8 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
             else:
                 db.add_saldo(chat_id, amount)
                 u = db.get_user(chat_id)
-                await bot.send_message(chat_id, f"✅ Deposit Berhasil! Saldo masuk Rp {amount:,}.\nTotal Saldo: Rp {u['saldo']:,}")
+                kb = await get_otp_keyboard()
+                await bot.send_message(chat_id, f"✅ Deposit Berhasil! Saldo masuk Rp {amount:,}.\nTotal Saldo: Rp {u['saldo']:,}", reply_markup=kb)
                 
         elif is_paid_status == "timeout":
             try:
@@ -241,7 +253,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
     asyncio.create_task(bg_wait_and_process())
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name):
-    # Cek status di bot_data, kalau di-cancel user, stop
     if not bot.bot_data.get(f"poll_{order_id}", True):
         return
 
@@ -274,14 +285,3 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name):
 async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
-
-async def nasky_cek_single(nomor):
-    import httpx
-    import os
-    NASKY_BASE = "https://nasky.web.id"
-    NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post(f"{NASKY_BASE}/api/cek", headers={"X-API-Key": NASKY_API_KEY}, json={"code": "kopken", "nomor": nomor})
-            return r.json()
-        except Exception as e: return {"success": False, "detail": f"Network error: {e}"}

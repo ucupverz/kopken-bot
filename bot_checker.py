@@ -278,7 +278,10 @@ async def handle_message(update, ctx):
         match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+([\d,]+)", text)
         service_name = match.group(1).strip() if match else re.sub(r"\s*\(\d+\)\s*-\s*[\d,]+$", "", text.replace("🛒 ", "")).strip()
         
-        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=None)
+        # Ambil keyboard OTP lagi biar ga nyangkut
+        kb_otp = await get_otp_keyboard()
+        
+        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
