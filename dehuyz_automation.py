@@ -1,24 +1,18 @@
 import asyncio
 import os
-import base64
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
-TG_SESSION_STR = os.getenv("TG_SESSION_STR", "") # String session dari laptop
+TG_SESSION_STR = os.getenv("TG_SESSION_STR", "")
 
 DEHUYZ_BOT = "@dehuyzwaotpbot"
 
 async def get_qris_and_wait_payment(amount: int):
-    """
-    Return: (status, qris_bytes_or_error)
-    status: "success", "timeout", "error"
-    """
     if not API_ID or not API_HASH:
         return "error", "TG_API_ID / TG_API_HASH belum di-set di Environment!"
 
-    # Connect ke Telegram pakai StringSession
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
     await client.connect()
     
@@ -29,13 +23,10 @@ async def get_qris_and_wait_payment(amount: int):
     try:
         # 1. Kirim /topup
         await client.send_message(DEHUYZ_BOT, "/topup")
-        await asyncio.sleep(3) # Tunggu respon
+        await asyncio.sleep(3) 
         
         # 2. Ambil pesan terakhir
         messages = await client.get_messages(DEHUYZ_BOT, limit=1)
-        if not messages:
-            return "error", "Bot tidak merespon /topup"
-            
         last_msg = messages[0]
         found_custom = False
         
@@ -50,22 +41,28 @@ async def get_qris_and_wait_payment(amount: int):
                 if found_custom: break
         
         if not found_custom:
-            return "error", "Tombol 'Nominal Custom' tidak ditemukan di bot dehuyz."
+            return "error", "Tombol 'Nominal Custom' tidak ditemukan."
             
         await asyncio.sleep(2)
         
         # 4. Kirim nominal
         await client.send_message(DEHUYZ_BOT, str(amount))
-        await asyncio.sleep(5) # Tunggu QRIS digenerate
         
-        # 5. Ambil pesan QRIS
-        messages = await client.get_messages(DEHUYZ_BOT, limit=1)
-        qris_msg = messages[0]
-        
-        if not qris_msg.photo:
-            return "error", "QRIS gambar tidak muncul."
+        # 5. LOOPING TUNGGU QRIS MUNCUL (Maksimal 60 detik)
+        qris_msg = None
+        for _ in range(15): # 15 x 4 detik = 60 detik
+            await asyncio.sleep(4)
+            messages = await client.get_messages(DEHUYZ_BOT, limit=1)
+            msg = messages[0]
             
-        # Download gambar QRIS ke memory (bytes)
+            if msg.photo: # Kalau udah ada gambar
+                qris_msg = msg
+                break
+                
+        if not qris_msg:
+            return "error", "QRIS gambar tidak muncul (Timeout 60s)."
+            
+        # Download gambar QRIS
         qris_bytes = await client.download_media(qris_msg, bytes)
         print(f"[DEHUYZ] QRIS didapatkan untuk nominal {amount}")
         
