@@ -771,14 +771,13 @@ def main():
         asyncio.create_task(tracker_worker(app.bot))
         print("[SFOOD] Tracker worker started")
         
-        # HAPUS ATAU COMMENT BAGIAN INI:
-        # domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "localhost")
-        # if domain == "localhost":
-        #     url_webhook = f"http://{domain}/telegram-webhook"
-        # else:
-        #     url_webhook = f"https://{domain}/telegram-webhook"
-        # await app.bot.set_webhook(url=url_webhook)
-        # print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+        if domain:
+            url_webhook = f"https://{domain}/telegram-webhook"
+            await app.bot.set_webhook(url=url_webhook)
+            print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
+        else:
+            print("[TELEGRAM] ⚠️ RAILWAY_PUBLIC_DOMAIN belum di-set!")
 
     # INI BARIS YANG TADI KEHAPUS
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
