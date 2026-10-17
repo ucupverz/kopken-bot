@@ -231,6 +231,31 @@ async def handle_message(update, ctx):
         await cmd_sfood(update, ctx)
         return
 
+    if text == "🍔 Tambah Order":
+        await update.message.reply_text(
+            "Kirim link tracker ShopeeFood + label opsional.\n\n"
+            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Label</code>",
+            parse_mode=ParseMode.HTML)
+        return
+
+    if text == "📋 List Order":
+        await cmd_sfood_list(update, ctx)
+        return
+
+    if text == "❌ Stop Order":
+        await update.message.reply_text(
+            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall",
+            parse_mode=ParseMode.HTML)
+        return
+
+    if text == "🔙 Menu Utama":
+        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+        await update.message.reply_text(
+            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
     if text == "📊 Tarif ShopeeFood":
         await update.message.reply_text(
             "📊 <b>Tarif ShopeeFood</b>\n\n"
