@@ -21,7 +21,7 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH, handle_ganti_nomor, handle_cancel_order,
+    BIAYA_CEK_FRESH, handle_ganti_nomor_inline, handle_cancel_order,
     handle_order_action_callback
 )
 
@@ -258,11 +258,6 @@ async def handle_message(update, ctx):
         return
 
     # ========== TOMBOL OTP ==========
-    if text == "🔄 Ganti Nomor":
-        from otp_handlers import handle_ganti_nomor
-        await handle_ganti_nomor(update, ctx)
-        return
-
     if text == "🔄 Kirim Ulang OTP":
         last_order = ctx.user_data.get('last_order')
         if not last_order:
