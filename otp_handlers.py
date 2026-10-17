@@ -204,7 +204,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
-        # === AUTO PROMO (TANPA CEK API DULU) ===
         if "kopken" in service_name.lower() and "filter" not in service_name.lower():
             promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya sekarang?\n(Biaya Rp {BIAYA_CEK_FRESH} jika FRESH, GRATIS jika sudah terdaftar)."
             cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{ph}")]])
@@ -486,10 +485,6 @@ async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['buy_state'] = 'WAITING_QTY'
 
 
-# =====================================================================
-# HANDLER CEK KOPKEN & TOMBOL FILTER
-# =====================================================================
-
 async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -501,18 +496,16 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
     result = await nasky_cek_single(phone)
     
-    # Kalau API Error / Maintenance
     if not result.get("success"):
-        # Ambil data Kopken Filter dari API
         services = await wahub_client.get_services()
         target_filter = next((s for s in services if s['name'].lower() == "kopken filter"), None)
         
         if target_filter and target_filter['stock'] > 0:
             harga_filter = target_filter['price'] + MARGIN
             btn_text = f"🛒 Beli Kopken Filter ({target_filter['stock']}) - {harga_filter:,}"
-            filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
+            filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buyfilter_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
         else:
-            filter_kb = None # Stok habis
+            filter_kb = None
 
         promo_txt = (
             f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
@@ -523,7 +516,6 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         await query.edit_message_text(promo_txt, parse_mode=ParseMode.HTML, reply_markup=filter_kb)
         return
         
-    # Kalau API Normal
     d = result["data"]
     if d["status"] == "fresh":
         if saldo < BIAYA_CEK_FRESH:
@@ -540,13 +532,11 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
 
 
 async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handler kalau user klik beli Kopken Filter pas lagi MT, otomatis batalin orderan aktif"""
     query = update.callback_query
     await query.answer()
     user = update.effective_user
     last_order = ctx.user_data.get('last_order')
     
-    # 1. Cancel order lama kalau ada
     if last_order:
         await query.message.reply_text("⏳ Membatalkan pesanan sebelumnya...")
         res, code = await wahub_client.cancel_order(last_order['order_id'])
@@ -559,7 +549,6 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
         else:
             await query.message.reply_text("⚠️ Gagal membatalkan pesanan lama, tapi lanjut proses beli Kopken Filter.")
 
-    # 2. Lanjut ke proses beli Kopken Filter
     data_parts = query.data.split("_")
     service_id = int(data_parts[2])
     harga_jual = int(data_parts[3])
