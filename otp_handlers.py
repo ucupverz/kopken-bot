@@ -59,9 +59,7 @@ async def nasky_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}"}
 
-# --- FUNGSI UI BOX PESANAN (Realtime Dehuyz) ---
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
-    # time_left dalam detik (default 20 menit)
     menit = time_left // 60
     detik = time_left % 60
     
@@ -172,24 +170,20 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 return
                 
         oid, tkn, ph = numbers_bought[0]
-        ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": total, "time_left": 1200} # 20 menit
+        ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": total, "time_left": 1200}
         
-        # Tampilkan UI 1 Box dengan Timer
         ui_text = build_order_ui(oid, service_name, ph, "Menunggu OTP", 1200)
         order_kb = ReplyKeyboardMarkup([
             ["❌ Batal & Refund", "🔄 Ganti Nomor"],
-            ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]
+            ["🔄 Kirim Ulang OTP", "📋 Cek Pesanan"],
+            ["🔙 Kembali ke Menu"]
         ], resize_keyboard=True)
         
         msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=order_kb)
         
-        # Simpan msg_id buat update UI nanti
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         
-        # Jalanin Timer (Update UI tiap 10 detik)
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
-        
-        # Jalanin Polling OTP
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
     else:
@@ -210,28 +204,28 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     while True:
-        await asyncio.sleep(10) # Update tiap 10 detik biar ga kena limit Telegram
+        await asyncio.sleep(10)
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
         if time_left <= 0:
             break
             
-        # Cek apakah pesanan udah selesai/batal
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
             break
             
-        # Update UI
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
         except Exception:
-            pass # Abaikan kalau gagal edit
+            pass
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
-    if not bot.bot_data.get(f"poll_{order_id}", True):
-        return
+    # Cek dari DB aja (fix error bot_data)
+    db_order = db.get_otp_order(order_id)
+    if not db_order or db_order['status'] != 'waiting':
+        return 
 
     res, status = await wahub_client.check_otp(token, timeout=60)
     if status == 200 and res.get('state') == 'success':
@@ -239,7 +233,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         db.update_otp_order_status(order_id, 'success', otp)
         await wahub_client.mark_done(order_id)
         
-        # Update UI jadi Selesai
         ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
         try:
             await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
@@ -275,7 +268,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                 except Exception:
                     await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML)
 
-# --- FUNGSI GANTI NOMOR ---
 async def handle_ganti_nomor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     last_order = ctx.user_data.get('last_order')
@@ -298,7 +290,6 @@ async def handle_ganti_nomor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Membatalkan nomor lama & memproses nomor baru...")
     
     cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
-    
     res, code = await wahub_client.rent_number(target_service['id'])
     
     if code == 200 and res.get('order_id'):
@@ -312,20 +303,19 @@ async def handle_ganti_nomor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ui_text = build_order_ui(new_oid, service_name, new_ph, "Menunggu OTP", 1200)
         order_kb = ReplyKeyboardMarkup([
             ["❌ Batal & Refund", "🔄 Ganti Nomor"],
-            ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]
+            ["🔄 Kirim Ulang OTP", "📋 Cek Pesanan"],
+            ["🔙 Kembali ke Menu"]
         ], resize_keyboard=True)
         
         msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=order_kb)
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         
-        # Jalanin Timer & Polling buat nomor baru
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, new_oid, service_name, new_ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, service_name, msg_ui.message_id, new_ph))
         
     else:
         await update.message.reply_text("❌ Gagal mendapatkan nomor baru dari provider. Saldo Anda aman.")
 
-# --- FUNGSI LAINNYA (JANGAN DIUBAH) ---
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = "💰 <b>Deposit Saldo OTP</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
     ctx.user_data['deposit_state'] = 'WAITING_AMOUNT'
@@ -381,7 +371,8 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     ui_text = build_order_ui(oid, service_name, ph, "Menunggu OTP", 1200)
                     order_kb = ReplyKeyboardMarkup([
                         ["❌ Batal & Refund", "🔄 Ganti Nomor"],
-                        ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]
+                        ["🔄 Kirim Ulang OTP", "📋 Cek Pesanan"],
+                        ["🔙 Kembali ke Menu"]
                     ], resize_keyboard=True)
                     
                     msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=order_kb)
