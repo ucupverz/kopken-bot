@@ -841,7 +841,7 @@ def main():
         port=8080,
         url_path="telegram-webhook",
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True
+        drop_pending_updates=False
     )
 
 if __name__ == "__main__":
