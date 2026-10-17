@@ -11,6 +11,7 @@ import dehuyz_automation
 
 QUICK_SERVICES = ["Kopken", "Kopken Filter", "Shopee", "Shopee Filter"] 
 MARGIN = 700
+BIAYA_CEK_FRESH = 200
 NASKY_BASE = "https://nasky.web.id"
 NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
 
