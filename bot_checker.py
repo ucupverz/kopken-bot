@@ -17,7 +17,8 @@ import database as db
 import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
-    cmd_deposit, get_otp_keyboard, handle_cekstatus_callback
+    cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
+    BIAYA_CEK_FRESH
 )
 
 from sfood_handlers import (
@@ -239,14 +240,6 @@ async def handle_message(update, ctx):
             parse_mode=ParseMode.HTML)
         return
 
-    if text == "🔙 Menu Utama":
-        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=kb)
-        return
-
     if text == "📊 Tarif ShopeeFood":
         await update.message.reply_text(
             "📊 <b>Tarif ShopeeFood</b>\n\n"
@@ -269,7 +262,7 @@ async def handle_message(update, ctx):
         return
 
     # --- HANDLER MENU OTP (KEYBOARD BAWAH) ---
-    if text == "🔙 Kembali ke Menu":
+    if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
         saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
         await update.message.reply_text(
@@ -282,16 +275,41 @@ async def handle_message(update, ctx):
         return
         
     if text.startswith("🛒 "):
-        import re
-        service_name = re.sub(r"\s*\(\d+\)$", "", text.replace("🛒 ", ""))
+        match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+([\d,]+)", text)
+        service_name = match.group(1).strip() if match else re.sub(r"\s*\(\d+\)\s*-\s*[\d,]+$", "", text.replace("🛒 ", "")).strip()
         
-        await update.message.reply_text(
-            f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
-            parse_mode=ParseMode.HTML,
-            reply_markup=None
-        )
+        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=None)
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
+        return
+
+    if text == "❌ Batal & Refund":
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
+            return
+        res, code = await wahub_client.cancel_order(last_order['order_id'])
+        if code == 200:
+            refund = res.get('refunded', 0)
+            db.add_saldo(user.id, refund)
+            await update.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} telah dikembalikan.")
+            ctx.user_data['last_order'] = None
+            kb = await get_otp_keyboard()
+            await update.message.reply_text("Menu OTP:", reply_markup=kb)
+        else:
+            await update.message.reply_text("❌ Gagal membatalkan pesanan. Mungkin waktu sewa habis.")
+        return
+
+    if text == "🔄 Kirim Ulang OTP":
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
+            return
+        res, code = await wahub_client.retry_otp(last_order['token'])
+        if code == 200:
+            await update.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
+        else:
+            await update.message.reply_text("❌ Gagal minta ulang OTP. Mungkin batas retry habis atau waktu sewa habis.")
         return
 
     text_upper = text.upper()
@@ -305,7 +323,6 @@ async def handle_message(update, ctx):
             await update.message.reply_text(f"❌ {message}")
         return
 
-    # Sisa logika cek nomor dan lainnya...
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     if len(lines) == 1 and is_valid_phone(lines[0]):
@@ -413,6 +430,62 @@ async def handle_message(update, ctx):
     await update.message.reply_text("❌ Format tidak dikenali.")
 
 
+# --- CALLBACK HANDLERS ---
+async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    
+    data_parts = query.data.split("_")
+    if len(data_parts) < 4 or data_parts[1] == "none":
+        return
+        
+    service_id = int(data_parts[2])
+    harga_jual = int(data_parts[3])
+    service_name = data_parts[4]
+    
+    ctx.user_data['buy_service'] = service_name
+    ctx.user_data['buy_qty'] = 1
+    ctx.user_data['buy_total'] = harga_jual
+    ctx.user_data['buy_id'] = service_id
+    
+    await query.edit_message_text(
+        f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
+        parse_mode=ParseMode.HTML
+    )
+    ctx.user_data['buy_state'] = 'WAITING_QTY'
+
+async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    phone = query.data.split("_")[2]
+    user = update.effective_user
+    u = db.get_user(user.id)
+    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+    
+    await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
+    
+    result = await nasky_cek_single(phone)
+    if not result.get("success"):
+        await query.edit_message_text(f"❌ Gagal cek: {result.get('detail', 'Unknown')}")
+        return
+        
+    d = result["data"]
+    if d["status"] == "fresh":
+        if saldo < 200:
+            await query.edit_message_text("❌ Saldo tidak cukup buat bayar biaya cek (Rp 200).")
+            return
+        db.deduct_saldo(user.id, 200)
+        reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Saldo terpotong: Rp 200."
+    elif d["status"] == "registered":
+        reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {d.get('customer_name') or '-'}\n\n💳 Cek GRATIS."
+    else:
+        reply = f"❓ Status tidak dikenal: `{d['status']}`"
+        
+    await query.edit_message_text(reply, parse_mode=ParseMode.MARKDOWN)
+
+# --- ADMIN COMMANDS ---
 async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -431,7 +504,6 @@ async def cmd_admin(update, ctx):
         f"*Kelola:* `/revoke <kode>` `/addkuota <id> <n>` `/addsaldo <id> <n>`"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
 
 async def cmd_genvoc(update, ctx):
     if not is_admin(update.effective_user.id):
@@ -480,7 +552,6 @@ async def cmd_genvoc(update, ctx):
         else:
             await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
 
-
 async def cmd_listvoc(update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -494,7 +565,6 @@ async def cmd_listvoc(update, ctx):
         lines.append(f"{status} `{r['code']}` — {r['quota']}x")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_revoke(update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -504,7 +574,6 @@ async def cmd_revoke(update, ctx):
     db.revoke_voc(ctx.args[0].upper())
     await update.message.reply_text(f"✅ Kode `{ctx.args[0].upper()}` dinonaktifkan.",
                                      parse_mode=ParseMode.MARKDOWN)
-
 
 async def cmd_addkuota(update, ctx):
     if not is_admin(update.effective_user.id):
@@ -525,7 +594,6 @@ async def cmd_addkuota(update, ctx):
     await update.message.reply_text(f"✅ Kuota user `{uid}` +{amt}. Total: {new_q}x",
                                      parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_addsaldo(update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -545,7 +613,6 @@ async def cmd_addsaldo(update, ctx):
     await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}",
                                      parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_stats(update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -557,7 +624,6 @@ async def cmd_stats(update, ctx):
         f"🔑 VOC aktif: {s['active_voc']}\n"
         f"🔑 VOC total: {s['total_voc']}",
         parse_mode=ParseMode.MARKDOWN)
-
 
 async def cmd_users(update, ctx):
     if not is_admin(update.effective_user.id):
@@ -575,7 +641,6 @@ async def cmd_users(update, ctx):
         saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
         lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Kuota: {u['quota']}x | Saldo: Rp {saldo:,} | {dt}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
 
 async def cmd_userinfo(update, ctx):
     if not is_admin(update.effective_user.id):
@@ -612,7 +677,6 @@ async def cmd_userinfo(update, ctx):
     else:
         text += "🔑 Belum pernah redeem VOC."
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
 
 async def cmd_vocdetail(update, ctx):
     if not is_admin(update.effective_user.id):
@@ -705,8 +769,10 @@ def main():
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
 
-    # Handler untuk Cek Status QRIS
+    # Handler Callback
     app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
+    app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
+    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

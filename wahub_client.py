@@ -61,3 +61,11 @@ async def mark_done(order_id):
             return r.json(), r.status_code
         except Exception as e:
             return {"error": str(e)}, 500
+
+async def retry_otp(token):
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.post(f"{WAHUB_BASE_URL}/api/rent/{token}/retry", headers=get_headers())
+            return r.json(), r.status_code
+        except Exception as e:
+            return {"error": str(e)}, 500
