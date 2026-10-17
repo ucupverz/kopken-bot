@@ -245,11 +245,42 @@ async def handle_message(update, ctx):
         return
 
     if text.startswith("🛒 "):
-        # ... (kode nangkep nama layanan) ...
-        # ... (kode nanya "berapa nomor") ...
+        match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
+        service_name = match.group(1).strip() if match else None
+        if not service_name:
+            await update.message.reply_text("❌ Format tombol tidak dikenali.")
+            return
+        kb_otp = await get_otp_keyboard()
+        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
+
+    # 👇 TARUH BLOK BARU DI SINI, PERSIS SEPERTI INI 👇
+    if text == "🔄 Ganti Nomor":
+        from otp_handlers import handle_ganti_nomor
+        await handle_ganti_nomor(update, ctx)
+        return
+        
+    if text == "🔄 Kirim Ulang OTP":
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
+            return
+        res, code = await wahub_client.retry_otp(last_order['token'])
+        if code == 200:
+            await update.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
+        else:
+            await update.message.reply_text("❌ Gagal minta ulang OTP. Mungkin batas retry habis atau waktu sewa habis.")
+        return
+    # 👆 SAMPAI SINI 👆
+
+    if text == "❌ Batal & Refund":
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
+            return
+        # ... sisa kode ...
 
     # 👇 TARUH DI SINI 👇
     if text == "🔄 Ganti Nomor":
