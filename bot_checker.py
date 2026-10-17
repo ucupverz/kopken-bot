@@ -9,7 +9,7 @@ import httpx
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    filters, ContextTypes, CallbackQueryHandler
 )
 from telegram.constants import ParseMode
 
@@ -29,6 +29,7 @@ from sfood_telemetry import (
     cmd_sfood_metrics, cmd_lokasi_saya, handle_live_location
 )
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
+from otp_handlers import cmd_otp_menu, handle_buy_callback, handle_cancel_callback
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
@@ -88,18 +89,19 @@ def sanitize_voc_input(text):
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
-        ["📊 Tarif ShopeeFood", "📡 Pantau Kurir"],
-        ["❓ Bantuan"]
+        ["📱 Beli Nomor OTP", "🔑 Pakai Kode VOC"],
+        ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
+        ["📡 Pantau Kurir", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["🔑 Pakai Kode VOC", "🍔 ShopeeFood"],
-        ["📊 Tarif ShopeeFood", "📡 Pantau Kurir"],
-        ["🔧 Admin Panel", "❓ Bantuan"]
+        ["📱 Beli Nomor OTP", "🔑 Pakai Kode VOC"],
+        ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
+        ["📡 Pantau Kurir", "🔧 Admin Panel"],
+        ["❓ Bantuan"]
     ], resize_keyboard=True)
 
 
@@ -121,15 +123,18 @@ async def cmd_start(update, ctx):
     db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
     kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     text = (
         f"Halo {user.first_name}! 👋\n\n"
         f"☕ *Bot Multi Fungsi*\n\n"
-        f"📊 Kuota kamu: *{u['quota']}x cek*\n\n"
+        f"📊 Kuota kamu: *{u['quota']}x cek*\n"
+        f"💰 Saldo OTP kamu: *Rp {saldo:,}*\n\n"
         f"*Fitur:*\n"
         f"• ☕ Cek Nomor Kopi Kenangan\n"
         f"• 🍔 ShopeeFood Tracker\n"
         f"• 📊 Tarif ShopeeFood\n"
         f"• 📡 Pantau Kurir\n"
+        f"• 📱 Beli Nomor OTP\n"
         f"• 🔑 Redeem kode VOC\n\n"
         f"Ketik `/help` untuk bantuan."
     )
@@ -149,6 +154,8 @@ async def cmd_help(update, ctx):
         "• `/sfood_metrics <order_id>` — Statistik order\n\n"
         "*📊 Tarif:*\n"
         "• `/tarif <angka>` — Input biaya layanan\n\n"
+        "*📱 OTP:*\n"
+        "• Klik tombol Beli Nomor OTP di keyboard\n\n"
         "*Commands:*\n"
         "/start, /help, /kuota, /sfood, /telemetry, /tarif"
     )
@@ -161,10 +168,12 @@ async def cmd_kuota(update, ctx):
     if not u:
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
+    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     await update.message.reply_text(
         f"📊 *Kuota Kamu*\n\n"
         f"Sisa kuota: *{u['quota']}x cek*\n"
-        f"Total cek: {u['total_cek']}x",
+        f"Total cek: {u['total_cek']}x\n"
+        f"💰 Saldo OTP: *Rp {saldo:,}*",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -192,6 +201,10 @@ async def handle_message(update, ctx):
 
     if text == "📊 Kuota Saya":
         await cmd_kuota(update, ctx)
+        return
+
+    if text == "📱 Beli Nomor OTP":
+        await cmd_otp_menu(update, ctx)
         return
 
     if text == "🔑 Pakai Kode VOC":
@@ -222,8 +235,9 @@ async def handle_message(update, ctx):
 
     if text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
         await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>",
+            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
             parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
@@ -381,7 +395,7 @@ async def cmd_admin(update, ctx):
         f"`/sfood_users` — List user\n"
         f"`/sfood_leaderboard` — Leaderboard\n"
         f"`/sfood_userinfo <id>` — Detail user\n\n"
-        f"*Kelola:* `/revoke <kode>` `/addkuota <id> <n>`"
+        f"*Kelola:* `/revoke <kode>` `/addkuota <id> <n>` `/addsaldo <id> <n>`"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -479,6 +493,26 @@ async def cmd_addkuota(update, ctx):
                                      parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_addsaldo(update, ctx):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(ctx.args) < 2:
+        await update.message.reply_text("Usage: `/addsaldo <id> <n>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        uid = int(ctx.args[0])
+        amt = int(ctx.args[1])
+    except ValueError:
+        return
+    if not db.get_user(uid):
+        await update.message.reply_text("❌ User tidak ditemukan.")
+        return
+    db.add_saldo(uid, amt)
+    new_s = db.get_user(uid)["saldo"]
+    await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}",
+                                     parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_stats(update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -505,7 +539,8 @@ async def cmd_users(update, ctx):
         uname = f"@{u['username']}" if u['username'] else "(no uname)"
         name = u['first_name'] or "(no name)"
         dt = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
-        lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Kuota: {u['quota']}x | {dt}")
+        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+        lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Kuota: {u['quota']}x | Saldo: Rp {saldo:,} | {dt}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
@@ -526,12 +561,14 @@ async def cmd_userinfo(update, ctx):
     import datetime as dtmod
     dt = dtmod.datetime.fromtimestamp(user['created_at']).strftime("%d/%m/%Y %H:%M")
     uname = f"@{user['username']}" if user['username'] else "(no uname)"
+    saldo = user['saldo'] if user and 'saldo' in user.keys() else 0
     text = (
         f"👤 *Detail User*\n\n"
         f"ID: `{user['user_id']}`\n"
         f"Username: {uname}\n"
         f"Nama: {user['first_name'] or '-'}\n\n"
         f"📊 Kuota: *{user['quota']}x*\n"
+        f"💰 Saldo OTP: *Rp {saldo:,}*\n"
         f"☕ Total cek: {user['total_cek']}x\n"
         f"📅 Daftar: {dt}\n\n"
     )
@@ -612,7 +649,6 @@ def main():
     app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
     app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
 
-    # Pantau Kurir (nama baru)
     app.add_handler(CommandHandler("telemetry", cmd_telemetry))
     app.add_handler(CommandHandler("pantau_on", cmd_pantau_on))
     app.add_handler(CommandHandler("pantau_off", cmd_pantau_off))
@@ -630,10 +666,14 @@ def main():
     app.add_handler(CommandHandler("listvoc", cmd_listvoc))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("addkuota", cmd_addkuota))
+    app.add_handler(CommandHandler("addsaldo", cmd_addsaldo))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
+
+    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
+    app.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=r"^otp_cancel_"))
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
