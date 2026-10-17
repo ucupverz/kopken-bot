@@ -1,5 +1,6 @@
 import httpx
 import os
+import asyncio
 
 WAHUB_BASE_URL = "https://dehuyzotp.shop"
 WAHUB_API_KEY = os.getenv("WAHUB_API_KEY", "")
@@ -11,6 +12,7 @@ def get_headers():
     }
 
 async def get_services():
+    # Timeout 15 detik biar ga nge-hang
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             r = await client.get(f"{WAHUB_BASE_URL}/api/services", headers=get_headers())
@@ -31,10 +33,27 @@ async def get_balance():
     return None
 
 async def rent_number(service_id):
+    # Timeout 20 detik. Kalau lebih dari 20 detik, anggap gagal.
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             r = await client.post(f"{WAHUB_BASE_URL}/api/rent", headers=get_headers(), json={"service_id": service_id})
-            return r.json(), r.status_code
+            
+            # Cek apakah respon sukses dan ada datanya
+            if r.status_code == 200:
+                data = r.json()
+                # Validasi apakah API ngasih token/nomor
+                if data.get('token') and data.get('phone'):
+                    return data, 200
+                else:
+                    # API ngasih 200 tapi datanya kosong / error internal
+                    print(f"[WAHUB] Rent response missing token/phone: {data}")
+                    return {"error": "Server provider sedang sibuk, nomor gagal dibuat."}, 500
+            else:
+                return r.json(), r.status_code
+                
+        except httpx.TimeoutException:
+            print("[WAHUB] Rent timeout setelah 20 detik")
+            return {"error": "Server provider timeout (20s). Silakan coba lagi."}, 408
         except Exception as e:
             return {"error": str(e)}, 500
 
