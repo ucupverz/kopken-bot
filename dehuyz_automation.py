@@ -9,28 +9,26 @@ TG_SESSION_STR = os.getenv("TG_SESSION_STR", "")
 
 DEHUYZ_BOT = "@dehuyzwaotpbot"
 
-async def get_qris_and_wait_payment(amount: int):
+async def request_qris(amount: int):
+    """Hanya minta QRIS ke bot dehuyz dan return gambar (bytes)."""
     if not API_ID or not API_HASH:
-        return "error", "TG_API_ID / TG_API_HASH belum di-set di Environment!"
+        return "error", "TG_API_ID / TG_API_HASH belum di-set!"
 
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
     await client.connect()
     
     if not await client.is_user_authorized():
         await client.disconnect()
-        return "error", "Session Telegram expired. Silakan bikin ulang StringSession."
+        return "error", "Session expired."
 
     try:
-        # 1. Kirim /topup
         await client.send_message(DEHUYZ_BOT, "/topup")
         await asyncio.sleep(3) 
         
-        # 2. Ambil pesan terakhir
         messages = await client.get_messages(DEHUYZ_BOT, limit=1)
         last_msg = messages[0]
         found_custom = False
         
-        # 3. Cari tombol "Nominal Custom"
         if last_msg.buttons:
             for row in last_msg.buttons:
                 for btn in row:
@@ -41,35 +39,43 @@ async def get_qris_and_wait_payment(amount: int):
                 if found_custom: break
         
         if not found_custom:
-            return "error", "Tombol 'Nominal Custom' tidak ditemukan."
+            return "error", "Tombol Custom tidak ditemukan."
             
         await asyncio.sleep(2)
-        
-        # 4. Kirim nominal
         await client.send_message(DEHUYZ_BOT, str(amount))
         
-        # 5. LOOPING TUNGGU QRIS MUNCUL (Maksimal 60 detik)
+        # Loop tunggu gambar (Max 60s)
         qris_msg = None
-        for _ in range(15): # 15 x 4 detik = 60 detik
+        for _ in range(15):
             await asyncio.sleep(4)
             messages = await client.get_messages(DEHUYZ_BOT, limit=1)
             msg = messages[0]
-            
-            if msg.photo: # Kalau udah ada gambar
+            if msg.photo:
                 qris_msg = msg
                 break
                 
         if not qris_msg:
-            return "error", "QRIS gambar tidak muncul (Timeout 60s)."
+            return "error", "QRIS tidak muncul."
             
-        # Download gambar QRIS
         qris_bytes = await client.download_media(qris_msg, bytes)
-        print(f"[DEHUYZ] QRIS didapatkan untuk nominal {amount}")
+        return "success", qris_bytes
         
-        # 6. Polling status pembayaran (Maks 5 menit)
-        max_wait = 300 
+    except Exception as e:
+        return "error", str(e)
+    finally:
+        await client.disconnect()
+
+async def wait_for_payment(amount: int):
+    """Polling cek status pembayaran setelah QRIS dikirim."""
+    client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
+    await client.connect()
+    try:
+        max_wait = 300 # 5 menit
         start_time = asyncio.get_event_loop().time()
-        last_id = qris_msg.id
+        
+        # Ambil pesan terakhir buat starting point
+        msgs = await client.get_messages(DEHUYZ_BOT, limit=1)
+        last_id = msgs[0].id if msgs else 0
         
         while asyncio.get_event_loop().time() - start_time < max_wait:
             await asyncio.sleep(5)
@@ -79,14 +85,8 @@ async def get_qris_and_wait_payment(amount: int):
                 if msg.id > last_id:
                     text = (msg.text or "").lower()
                     if "berhasil" in text and "saldo" in text:
-                        print(f"[DEHUYZ] Pembayaran Sukses untuk Rp{amount}")
-                        return "success", qris_bytes
+                        return True
                     last_id = msg.id
-                    
-        return "timeout", qris_bytes
-        
-    except Exception as e:
-        print(f"[DEHUYZ] Error: {e}")
-        return "error", str(e)
+        return False
     finally:
         await client.disconnect()

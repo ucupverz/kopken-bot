@@ -86,8 +86,8 @@ async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount
     asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, amount, ctx, is_direct_buy=False))
 
 async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
-    # 1. Minta QRIS ke Dehuyz via Telethon
-    status, result = await dehuyz_automation.get_qris_and_wait_payment(amount)
+    # 1. Minta QRIS ke Dehuyz (Tunggu sampai dapet gambar)
+    status, result = await dehuyz_automation.request_qris(amount)
     
     if status == "error":
         await bot.send_message(chat_id, f"❌ Gagal membuat QRIS: {result}")
@@ -95,7 +95,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
         
     qris_bytes = result
     
-    # 2. Kirim QRIS ke User
+    # 2. LANGSUNG KIRIM QRIS KE USER (Biar user ga nunggu)
     text = (
         f"🧾 <b>Pembayaran: Rp {amount:,}</b>\n\n"
         f"Silakan scan QRIS di atas.\n"
@@ -103,43 +103,41 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
     )
     await bot.send_photo(chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"), caption=text, parse_mode=ParseMode.HTML)
     
-    # 3. Kalau statusnya SUKSES (user udah bayar)
-    if status == "success":
-        if is_direct_buy:
-            # Logika sewa nomor (karena direct buy)
-            service_name = ctx.user_data.get('buy_service')
-            service_id = ctx.user_data.get('buy_id')
-            qty = ctx.user_data.get('buy_qty', 1)
-            
-            numbers_bought = []
-            for _ in range(qty):
-                res, code = await wahub_client.rent_number(service_id)
-                if code == 200:
-                    db.create_otp_order(chat_id, res['order_id'], res['token'], res['phone'], service_name, amount // qty)
-                    numbers_bought.append((res['order_id'], res['token'], res['phone']))
-            
-            txt = f"✅ <b>Pembayaran Berhasil! Nomor Anda:</b>\n\n"
-            for i, (oid, tkn, ph) in enumerate(numbers_bought, 1):
-                txt += f"{i}. <code>{ph}</code>\n"
-                asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, service_name))
-            await bot.send_message(chat_id, txt, parse_mode=ParseMode.HTML)
-            
+    # 3. Di background, bot nungguin user bayar
+    async def bg_wait_and_process():
+        is_paid = await dehuyz_automation.wait_for_payment(amount)
+        
+        if is_paid:
+            if is_direct_buy:
+                service_name = ctx.user_data.get('buy_service')
+                service_id = ctx.user_data.get('buy_id')
+                qty = ctx.user_data.get('buy_qty', 1)
+                
+                numbers_bought = []
+                for _ in range(qty):
+                    res, code = await wahub_client.rent_number(service_id)
+                    if code == 200:
+                        db.create_otp_order(chat_id, res['order_id'], res['token'], res['phone'], service_name, amount // qty)
+                        numbers_bought.append((res['order_id'], res['token'], res['phone']))
+                
+                txt = f"✅ <b>Pembayaran Berhasil! Nomor Anda:</b>\n\n"
+                for i, (oid, tkn, ph) in enumerate(numbers_bought, 1):
+                    txt += f"{i}. <code>{ph}</code>\n"
+                    asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, service_name))
+                await bot.send_message(chat_id, txt, parse_mode=ParseMode.HTML)
+            else:
+                db.add_saldo(chat_id, amount)
+                u = db.get_user(chat_id)
+                await bot.send_message(chat_id, f"✅ Deposit Berhasil! Saldo masuk Rp {amount:,}.\nTotal Saldo: Rp {u['saldo']:,}")
         else:
-            # Logika nambah saldo user (karena deposit)
-            db.add_saldo(chat_id, amount)
-            u = db.get_user(chat_id)
-            await bot.send_message(chat_id, f"✅ Deposit Berhasil! Saldo masuk Rp {amount:,}.\nTotal Saldo: Rp {u['saldo']:,}")
-            
-        ctx.user_data.clear()
-    else:
-        # Kalau timeout (belum bayar)
-        await bot.send_message(chat_id, "⏰ Waktu pembayaran habis. Silakan coba lagi.")
+            await bot.send_message(chat_id, "⏰ Waktu pembayaran habis (5 menit). Silakan ulangi transaksi.")
+
+    # Jalanin pengecekan di background tanpa bikin bot freeze
+    asyncio.create_task(bg_wait_and_process())
 
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Fungsi ini opsional jika lu masih pakai inline keyboard, 
-    # tapi karena lu udah pakai reply keyboard, ini bisa dibiarkan kosong.
     pass
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name):
@@ -187,7 +185,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name):
 async def handle_cancel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Sama seperti handle_buy_callback, ini bisa dibiarkan kosong jika pakai reply keyboard
     pass
 
 async def handle_all_services(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
