@@ -105,7 +105,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         await update.message.reply_text("Menu OTP:", reply_markup=kb_bawah)
         return
 
-    # Cek stok dulu
     if target_service['stock'] < qty:
         await update.message.reply_text(f"❌ Maaf, stok {service_name} sedang habis atau tidak cukup (Sisa: {target_service['stock']}).", reply_markup=await get_otp_keyboard())
         ctx.user_data['is_processing'] = False
@@ -120,7 +119,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     kb_bawah = await get_otp_keyboard()
     
     if saldo >= total:
-        # LOCK SALDO DULU
         if not db.deduct_saldo(user.id, total):
             await update.message.reply_text("❌ Gagal memotong saldo.")
             ctx.user_data['is_processing'] = False
@@ -130,7 +128,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         numbers_bought = []
         for _ in range(qty):
-            # Tembak API WAHub
             res, code = await wahub_client.rent_number(target_service['id'])
             
             if code == 200 and res.get('order_id'):
@@ -138,12 +135,9 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 token = res.get('token')
                 phone = res.get('phone')
                 
-                # Jika API belum ngasih nomor, kita simpan order_id aja dulu.
-                # Nanti nomor bakal dikirim otomatis via Webhook (FastAPI) ke UI
                 db.create_otp_order(user.id, order_id, token, phone, service_name, harga_satuan)
                 numbers_bought.append((order_id, token, phone))
             else:
-                # Gagal tembak API, refund saldo
                 db.add_saldo(user.id, total)
                 await msg.edit_text("❌ Gagal membuat pesanan (Stok habis / API error). Saldo Anda dikembalikan.", reply_markup=kb_bawah)
                 ctx.user_data['is_processing'] = False
@@ -161,7 +155,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         order_kb = ReplyKeyboardMarkup([["❌ Batal & Refund", "🔄 Kirim Ulang OTP"], ["📋 Cek Pesanan", "🔙 Kembali ke Menu"]], resize_keyboard=True)
         
-        # Tampilkan UI Awal (Menunggu OTP)
         await ctx.bot.send_message(
             chat_id=user.id, 
             text=f"⏳ <b>Menunggu Nomor HP dari Provider...</b>\n\nOrder ID: <code>{oid}</code>\nLayanan: {service_name}", 
@@ -183,3 +176,156 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
+
+async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = "💰 <b>Deposit Saldo OTP</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
+    ctx.user_data['deposit_state'] = 'WAITING_AMOUNT'
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=None)
+
+async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount: int):
+    if amount < 5000:
+        await update.message.reply_text("❌ Minimal deposit Rp 5.000.")
+        return
+    ctx.user_data['deposit_state'] = None 
+    msg = await update.message.reply_text(f"⏳ Memproses QRIS untuk Rp {amount:,}...", parse_mode=ParseMode.HTML)
+    asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, amount, ctx, is_direct_buy=False))
+
+async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
+    status, result = await dehuyz_automation.request_qris(amount)
+    if status == "error":
+        await bot.send_message(chat_id, f"❌ Gagal membuat QRIS: {result}")
+        return
+        
+    qris_bytes = result["image"]
+    caption_dehuy = result["caption"]
+    qris_msg_id = result["msg_id"] 
+    
+    keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
+    qris_msg = await bot.send_photo(
+        chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"), 
+        caption=caption_dehuy, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+    async def bg_wait_and_process():
+        is_paid_status = await dehuyz_automation.wait_for_payment(amount, qris_msg_id)
+        if is_paid_status == "success":
+            try:
+                await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"✅ <b>Topup Rp{amount:,} berhasil, saldo sudah masuk.</b>", parse_mode=ParseMode.HTML, reply_markup=None)
+            except Exception: pass
+                
+            if is_direct_buy:
+                service_name = ctx.user_data.get('buy_service')
+                service_id = ctx.user_data.get('buy_id')
+                qty = ctx.user_data.get('buy_qty', 1)
+                
+                res, code = await wahub_client.rent_number(service_id)
+                
+                if code == 200 and res.get('order_id'):
+                    oid = res['order_id']
+                    tkn = res['token']
+                    ph = res['phone']
+                    harga_satuan = amount // qty
+                    
+                    db.create_otp_order(chat_id, oid, tkn, ph, service_name, harga_satuan)
+                    ctx.bot_data[f"poll_{oid}"] = True
+                    
+                    ui_text = (
+                        f"✅ <b>Pesanan Aktif</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🆔 Order ID: <code>{oid}</code>\n"
+                        f"📞 No. HP: <code>{ph}</code>\n"
+                        f"📱 Layanan: {service_name}\n"
+                        f"⏳ Status: <b>Menunggu OTP</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<i>OTP akan otomatis dikirim ke chat ini jika masuk.</i>"
+                    )
+                    order_kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_resend_{oid}_{tkn}")],
+                        [InlineKeyboardButton("❌ Batalkan Pesanan", callback_data=f"otp_cancel_{oid}")]
+                    ])
+                    
+                    msg = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=order_kb)
+                    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": amount, "msg_id": msg.message_id}
+                    
+                    asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, service_name, msg.message_id))
+                else:
+                    db.add_saldo(chat_id, amount)
+                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar. Saldo Rp {amount:,} dikembalikan.")
+                
+            else:
+                db.add_saldo(chat_id, amount)
+                u = db.get_user(chat_id)
+                kb = await get_otp_keyboard()
+                await bot.send_message(chat_id, f"✅ Deposit Berhasil! Saldo masuk Rp {amount:,}.\nTotal Saldo: Rp {u['saldo']:,}", reply_markup=kb)
+                
+        elif is_paid_status == "timeout":
+            try:
+                await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"❌ <b>QRIS Kadaluarsa</b>", parse_mode=ParseMode.HTML, reply_markup=None)
+            except Exception: pass
+
+    asyncio.create_task(bg_wait_and_process())
+
+async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id):
+    if not bot.bot_data.get(f"poll_{order_id}", True):
+        return
+
+    res, status = await wahub_client.check_otp(token, timeout=60)
+    if status == 200 and res.get('state') == 'success':
+        otp = res.get('otp')
+        db.update_otp_order_status(order_id, 'success', otp)
+        await wahub_client.mark_done(order_id)
+        
+        ui_text = (
+            f"✅ <b>Pesanan Selesai</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 Order ID: <code>{order_id}</code>\n"
+            f"📱 Layanan: {service_name}\n"
+            f"🔑 Kode OTP: <code>{otp}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
+        )
+        try:
+            await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            await bot.send_message(chat_id=user_id, text=f"🎉 <b>OTP DITERIMA!</b>\n\nKode: <code>{otp}</code>", parse_mode=ParseMode.HTML)
+        return
+        
+    db_order = db.get_otp_order(order_id)
+    if db_order and db_order['status'] != 'waiting': return 
+        
+    res2, status2 = await wahub_client.check_otp(token, timeout=60)
+    if status2 == 200 and res2.get('state') == 'success':
+        otp = res2.get('otp')
+        db.update_otp_order_status(order_id, 'success', otp)
+        await wahub_client.mark_done(order_id)
+        
+        ui_text = (
+            f"✅ <b>Pesanan Selesai</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 Order ID: <code>{order_id}</code>\n"
+            f"📱 Layanan: {service_name}\n"
+            f"🔑 Kode OTP: <code>{otp}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
+        )
+        try:
+            await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            await bot.send_message(chat_id=user_id, text=f"🎉 <b>OTP DITERIMA!</b>\n\nKode: <code>{otp}</code>", parse_mode=ParseMode.HTML)
+    else:
+        db_order = db.get_otp_order(order_id)
+        if db_order and db_order['status'] == 'waiting':
+            cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
+            if cxl_status == 200:
+                db.update_otp_order_status(order_id, 'expired')
+                db.add_saldo(user_id, db_order['price'])
+                
+                ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Saldo Rp {db_order['price']:,} dikembalikan."
+                try:
+                    await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
+                except Exception:
+                    await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML)
+
+async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
