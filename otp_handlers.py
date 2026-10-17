@@ -65,7 +65,6 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_le
     detik = time_left % 60
     
     if status == "Menunggu OTP":
-        # Bikin progress bar (20 blok)
         total_blocks = 20
         sisa_blocks = int((time_left / 1200) * total_blocks)
         if sisa_blocks < 0: sisa_blocks = 0
@@ -190,7 +189,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         
-        # Timer jalan tiap 5 detik (biar aman dari limit telegram)
+        # Jalanin Timer
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
@@ -225,10 +224,12 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         if time_left <= 0:
             break
             
+        # Cek status pesanan dari DB
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
             break
             
+        # Update UI dengan waktu yang beneran mundur
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
