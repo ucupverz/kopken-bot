@@ -278,25 +278,6 @@ async def handle_message(update, ctx):
         await handle_cancel_order(update, ctx)
         return
 
-    if text == "❌ Batal & Refund":
-        last_order = ctx.user_data.get('last_order')
-        if not last_order:
-            await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
-            return
-        ctx.bot_data[f"poll_{last_order['order_id']}"] = False
-        res, code = await wahub_client.cancel_order(last_order['order_id'])
-        if code == 200:
-            refund_amount = last_order.get('price', 0)
-            db.add_saldo(user.id, refund_amount)
-            await update.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund_amount:,} telah dikembalikan.")
-            ctx.user_data['last_order'] = None
-            kb = await get_otp_keyboard()
-            await update.message.reply_text("Menu OTP:", reply_markup=kb)
-        else:
-            await update.message.reply_text("❌ Gagal membatalkan pesanan. Mungkin waktu sewa habis.")
-        return
-    # ========== END TOMBOL OTP ==========
-
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
         success, message, quota = db.use_voc(text_upper, user.id)
