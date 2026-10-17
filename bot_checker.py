@@ -17,7 +17,7 @@ import database as db
 import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
-    cmd_deposit, otp_keyboard, handle_cekstatus_callback
+    cmd_deposit, get_otp_keyboard, handle_cekstatus_callback
 )
 
 from sfood_handlers import (
