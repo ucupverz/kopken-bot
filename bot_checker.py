@@ -6,6 +6,8 @@ import string
 import re
 import time
 import httpx
+from flask import Flask, request, jsonify
+import threading
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -18,7 +20,7 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH
+    BIAYA_CEK_FRESH, poll_otp_bg
 )
 
 from sfood_handlers import (
@@ -42,54 +44,42 @@ NASKY_BASE = "https://nasky.web.id"
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 DEFAULT_VOC_QUOTA = int(os.getenv("DEFAULT_VOC_QUOTA", "3"))
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- GLOBAL UNTUK WEBHOOK & FLASK ---
+flask_app = Flask(__name__)
+bot_application = None
+bot_loop = None
+msg_id_cache = {} # Nyimpen msg_id buat update UI 1 Box
 
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
+def is_admin(user_id): return user_id in ADMIN_IDS
 
 def normalize_phone(text):
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
-    if t.startswith("0"):
-        t = "62" + t[1:]
+    if t.startswith("0"): t = "62" + t[1:]
     return t
 
-
 def format_phone_display(phone_62):
-    if phone_62.startswith("62"):
-        return "0" + phone_62[2:]
+    if phone_62.startswith("62"): return "0" + phone_62[2:]
     return phone_62
-
 
 def is_valid_phone(text):
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
-    if not t.isdigit():
-        return False
-    if t.startswith("62"):
-        return 10 <= len(t) <= 15
-    if t.startswith("0"):
-        return 10 <= len(t) <= 14
+    if not t.isdigit(): return False
+    if t.startswith("62"): return 10 <= len(t) <= 15
+    if t.startswith("0"): return 10 <= len(t) <= 14
     return False
-
 
 def gen_voc_code():
     chars = string.ascii_uppercase + string.digits
     return f"VOC-{''.join(random.choices(chars, k=6))}"
 
-
 def sanitize_voc_input(text):
     t = text.strip().upper().replace(" ", "")
-    if not re.match(r"^[A-Z0-9_-]+$", t):
-        return None
-    if len(t) < 3 or len(t) > 50:
-        return None
+    if not re.match(r"^[A-Z0-9_-]+$", t): return None
+    if len(t) < 3 or len(t) > 50: return None
     return t
-
 
 def main_keyboard():
     return ReplyKeyboardMarkup([
@@ -98,7 +88,6 @@ def main_keyboard():
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "❓ Bantuan"]
     ], resize_keyboard=True)
-
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
@@ -109,19 +98,12 @@ def admin_keyboard():
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
-
 async def nasky_cek_single(nomor):
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            r = await client.post(
-                f"{NASKY_BASE}/api/cek",
-                headers={"X-API-Key": NASKY_API_KEY},
-                json={"code": "kopken", "nomor": nomor}
-            )
+            r = await client.post(f"{NASKY_BASE}/api/cek", headers={"X-API-Key": NASKY_API_KEY}, json={"code": "kopken", "nomor": nomor})
             return r.json()
-        except Exception as e:
-            return {"success": False, "detail": f"Network error: {e}"}
-
+        except Exception as e: return {"success": False, "detail": f"Network error: {e}"}
 
 async def cmd_start(update, ctx):
     user = update.effective_user
@@ -134,17 +116,9 @@ async def cmd_start(update, ctx):
         f"☕ *Bot Multi Fungsi*\n\n"
         f"📊 Kuota kamu: *{u['quota']}x cek*\n"
         f"💰 Saldo OTP kamu: *Rp {saldo:,}*\n\n"
-        f"*Fitur:*\n"
-        f"• ☕ Cek Nomor Kopi Kenangan\n"
-        f"• 🍔 ShopeeFood Tracker\n"
-        f"• 📊 Tarif ShopeeFood\n"
-        f"• 📡 Pantau Kurir\n"
-        f"• 📱 Beli Nomor OTP\n"
-        f"• 🔑 Redeem kode VOC\n\n"
         f"Ketik `/help` untuk bantuan."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-
 
 async def cmd_help(update, ctx):
     text = (
@@ -166,7 +140,6 @@ async def cmd_help(update, ctx):
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_kuota(update, ctx):
     user = update.effective_user
     u = db.get_user(user.id)
@@ -174,14 +147,7 @@ async def cmd_kuota(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    await update.message.reply_text(
-        f"📊 *Kuota Kamu*\n\n"
-        f"Sisa kuota: *{u['quota']}x cek*\n"
-        f"Total cek: {u['total_cek']}x\n"
-        f"💰 Saldo OTP: *Rp {saldo:,}*",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
+    await update.message.reply_text(f"📊 *Kuota Kamu*\n\nSisa kuota: *{u['quota']}x cek*\nTotal cek: {u['total_cek']}x\n💰 Saldo OTP: *Rp {saldo:,}*", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_message(update, ctx):
     text = (update.message.text or "").strip()
@@ -208,10 +174,8 @@ async def handle_message(update, ctx):
 
     # --- HANDLER MENU UTAMA ---
     if text == "☕ Cek Kopken":
-        if u["quota"] <= 0:
-            await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
-        else:
-            await update.message.reply_text("Kirim nomor HP yang mau dicek, contoh:\n`081234567890`", parse_mode=ParseMode.MARKDOWN)
+        if u["quota"] <= 0: await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
+        else: await update.message.reply_text("Kirim nomor HP yang mau dicek, contoh:\n`081234567890`", parse_mode=ParseMode.MARKDOWN)
         return
 
     if text == "📊 Kuota Saya":
@@ -235,18 +199,11 @@ async def handle_message(update, ctx):
         return
 
     if text == "❌ Stop Order":
-        await update.message.reply_text(
-            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall",
-            parse_mode=ParseMode.HTML)
+        await update.message.reply_text("Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall", parse_mode=ParseMode.HTML)
         return
 
     if text == "📊 Tarif ShopeeFood":
-        await update.message.reply_text(
-            "📊 <b>Tarif ShopeeFood</b>\n\n"
-            "<code>/tarif &lt;angka&gt;</code> — Input biaya\n"
-            "<code>/tarif_cek</code> — Cek status\n"
-            "<code>/tarif_stats</code> — Statistik",
-            parse_mode=ParseMode.HTML)
+        await update.message.reply_text("📊 <b>Tarif ShopeeFood</b>\n\n<code>/tarif &lt;angka&gt;</code> — Input biaya\n<code>/tarif_cek</code> — Cek status\n<code>/tarif_stats</code> — Statistik", parse_mode=ParseMode.HTML)
         return
 
     if text == "📡 Pantau Kurir":
@@ -265,9 +222,7 @@ async def handle_message(update, ctx):
     if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
         saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     if text == "💰 Deposit Saldo":
@@ -275,7 +230,6 @@ async def handle_message(update, ctx):
         return
         
     if text == "📋 Cek Pesanan":
-        # Cegah cek pesanan kalau ada proses lain
         if ctx.user_data.get('is_processing'):
             await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
             return
@@ -298,10 +252,9 @@ async def handle_message(update, ctx):
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
         return
-    
-    # --- HANDLER DETEKSI TOMBOL LAYANAN (🛒) ---
+
     if text.startswith("🛒 "):
-        # Regex ini lebih kuat buat nangkep nama layanan dengan spasi (misal: "Kopken Filter")
+        # Ambil nama layanan dengan memisahkan dari format "🛒 Nama (Stok) - Harga"
         match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
         service_name = match.group(1).strip() if match else None
         
@@ -466,8 +419,7 @@ async def handle_message(update, ctx):
 
     await update.message.reply_text("❌ Format tidak dikenali.")
 
-
-# --- HANDLERS CALLBACK (INLINE BUTTONS) ---
+# --- CALLBACK HANDLERS ---
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -754,7 +706,57 @@ async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
 
 
+# --- ROUTE WEBHOOK DEHUYZ ---
+@flask_app.route('/wahub-webhook', methods=['POST'])
+def wahub_webhook():
+    data = request.json
+    print(f"[WEBHOOK] Menerima data: {data}")
+    
+    order_id = str(data.get('order_id'))
+    otp = data.get('otp')
+    
+    if order_id and otp:
+        if bot_loop and bot_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                process_webhook_otp(order_id, otp), 
+                bot_loop
+            )
+        return jsonify({"status": "success"}), 200
+        
+    return jsonify({"status": "ignored"}), 200
+
+async def process_webhook_otp(order_id, otp):
+    order = db.get_otp_order(order_id)
+    if not order:
+        print(f"[WEBHOOK] Order {order_id} tidak ada di DB.")
+        return
+        
+    db.update_otp_order_status(order_id, 'success', otp)
+    chat_id = order['user_id']
+    
+    msg_id = msg_id_cache.get(f"msg_{order_id}")
+    
+    ui_text = (
+        f"✅ <b>Pesanan Selesai</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Order ID: <code>{order_id}</code>\n"
+        f"📱 Layanan: {order['service_name']}\n"
+        f"🔑 Kode OTP: <code>{otp}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
+    )
+    
+    if msg_id:
+        try:
+            await bot_application.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"[WEBHOOK] Gagal edit pesan: {e}")
+    else:
+        await bot_application.bot.send_message(chat_id=chat_id, text=ui_text, parse_mode=ParseMode.HTML)
+
+
 def main():
+    global bot_application, bot_loop
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN belum di-set")
         return
@@ -768,8 +770,15 @@ def main():
         app.bot_data["admin_ids"] = ADMIN_IDS
         asyncio.create_task(tracker_worker(app.bot))
         print("[SFOOD] Tracker worker started")
+        
+        # Set Webhook Telegram
+        url_webhook = f"{os.getenv('RAILWAY_PUBLIC_DOMAIN', 'http://localhost')}/telegram-webhook"
+        await app.bot.set_webhook(url=url_webhook)
+        print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
 
+    # Build Bot Application
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    bot_application = app
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -806,7 +815,6 @@ def main():
     app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
 
-    # Handler Callback
     app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
     app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
     app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
@@ -815,9 +823,23 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
-    print("🤖 Bot jalan... Ctrl+C untuk stop")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Jalanin Flask Server di background (Port 8080)
+    def run_flask():
+        flask_app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
 
+    threading.Thread(target=run_flask, daemon=True).start()
+    print("🌐 Web Server (Flask) jalan di port 8080")
+
+    # Jalanin Bot (Webhook Mode)
+    bot_loop = asyncio.get_event_loop()
+    print("🤖 Bot jalan dalam mode Webhook...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=8080,
+        url_path="telegram-webhook",
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
 
 if __name__ == "__main__":
     main()
