@@ -59,12 +59,19 @@ async def nasky_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}"}
 
+# --- FUNGSI UI BOX PESANAN DENGAN PROGRESS BAR ---
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = time_left // 60
     detik = time_left % 60
     
     if status == "Menunggu OTP":
-        status_line = f"⏳ Status: <b>Menunggu OTP</b> (<b>{menit:02d}:{detik:02d}</b>)"
+        # Bikin progress bar (20 blok)
+        total_blocks = 20
+        sisa_blocks = int((time_left / 1200) * total_blocks)
+        if sisa_blocks < 0: sisa_blocks = 0
+        progress_bar = "█" * sisa_blocks + "░" * (total_blocks - sisa_blocks)
+        
+        status_line = f"⏳ <b>Menunggu OTP</b>\n<code>[{progress_bar}] {menit:02d}:{detik:02d}</code>"
         otp_line = ""
     elif status == "Selesai":
         status_line = f"✅ Status: <b>Selesai</b>"
@@ -183,6 +190,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         
+        # Timer jalan tiap 5 detik (biar aman dari limit telegram)
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
@@ -210,7 +218,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     while True:
-        await asyncio.sleep(10) # Update tiap 10 detik
+        await asyncio.sleep(5) # Update tiap 5 detik
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
@@ -432,7 +440,12 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
     result = await nasky_cek_single(phone)
     if not result.get("success"):
-        await query.edit_message_text(f"❌ Gagal cek: {result.get('detail', 'Unknown')}")
+        promo_txt = (
+            f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
+            f"Lu ga perlu pusing, lu bisa langsung pakai nomor <code>{phone}</code> ini.\n"
+            f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!"
+        )
+        await query.edit_message_text(promo_txt, parse_mode=ParseMode.HTML)
         return
     d = result["data"]
     if d["status"] == "fresh":
