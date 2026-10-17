@@ -21,7 +21,8 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH, handle_order_action_callback
+    BIAYA_CEK_FRESH, handle_ganti_nomor_inline, 
+    handle_order_action_callback, handle_buy_filter_auto_cancel_callback
 )
 
 from sfood_handlers import (
@@ -400,31 +401,6 @@ async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML)
     ctx.user_data['buy_state'] = 'WAITING_QTY'
 
-async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    phone = query.data.split("_")[2]
-    user = update.effective_user
-    u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
-    result = await nasky_cek_single(phone)
-    if not result.get("success"):
-        await query.edit_message_text(f"❌ Gagal cek: {result.get('detail', 'Unknown')}")
-        return
-    d = result["data"]
-    if d["status"] == "fresh":
-        if saldo < 200:
-            await query.edit_message_text("❌ Saldo tidak cukup buat bayar biaya cek (Rp 200).")
-            return
-        db.deduct_saldo(user.id, 200)
-        reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Saldo terpotong: Rp 200."
-    elif d["status"] == "registered":
-        reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {d.get('customer_name') or '-'}\n\n💳 Cek GRATIS."
-    else:
-        reply = f"❓ Status tidak dikenal: `{d['status']}`"
-    await query.edit_message_text(reply, parse_mode=ParseMode.MARKDOWN)
-
 async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id): return
     s = db.get_stats()
@@ -643,6 +619,8 @@ def main():
     bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
     bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
     bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
+    from otp_handlers import handle_cek_kopken_callback
     bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))

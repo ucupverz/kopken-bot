@@ -510,7 +510,7 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         if target_filter and target_filter['stock'] > 0:
             harga_filter = target_filter['price'] + MARGIN
             btn_text = f"🛒 Beli Kopken Filter ({target_filter['stock']}) - {harga_filter:,}"
-            filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buyfilter_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
+            filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
         else:
             filter_kb = None # Stok habis
 
