@@ -1,687 +1,719 @@
+import sqlite3
 import os
-import asyncio
-import logging
-import random
-import string
-import re
 import time
-import httpx
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    filters, ContextTypes, CallbackQueryHandler
-)
-from telegram.constants import ParseMode
+import datetime
+from contextlib import contextmanager
 
-import database as db
+DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
-from sfood_handlers import (
-    cmd_sfood, cmd_sfood_list, cmd_sfood_stop,
-    cmd_sfood_stopall, handle_sfood_message
-)
-from sfood_tracker import tracker_worker
-from sfood_admin_handlers import (
-    cmd_sfood_users, cmd_sfood_leaderboard, cmd_sfood_userinfo
-)
-from sfood_telemetry import (
-    cmd_telemetry, cmd_pantau_on, cmd_pantau_off,
-    cmd_jarak_set, cmd_stuck_set,
-    cmd_sfood_metrics, cmd_lokasi_saya, handle_live_location
-)
-from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
-from otp_handlers import cmd_otp_menu, handle_buy_callback, handle_cancel_callback
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
-NASKY_BASE = "https://nasky.web.id"
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-DEFAULT_VOC_QUOTA = int(os.getenv("DEFAULT_VOC_QUOTA", "3"))
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir and not os.path.exists(_db_dir):
+    try:
+        os.makedirs(_db_dir, exist_ok=True)
+        print(f"✅ Folder database dibuat: {_db_dir}")
+    except Exception as e:
+        print(f"⚠️ Gagal bikin folder {_db_dir}: {e}, fallback ke ./kopken.db")
+        DB_PATH = "kopken.db"
 
 
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-
-def normalize_phone(text):
-    t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
-    if t.startswith("0"):
-        t = "62" + t[1:]
-    return t
-
-
-def format_phone_display(phone_62):
-    if phone_62.startswith("62"):
-        return "0" + phone_62[2:]
-    return phone_62
-
-
-def is_valid_phone(text):
-    t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
-    if not t.isdigit():
-        return False
-    if t.startswith("62"):
-        return 10 <= len(t) <= 15
-    if t.startswith("0"):
-        return 10 <= len(t) <= 14
-    return False
-
-
-def gen_voc_code():
-    chars = string.ascii_uppercase + string.digits
-    return f"VOC-{''.join(random.choices(chars, k=6))}"
-
-
-def sanitize_voc_input(text):
-    t = text.strip().upper().replace(" ", "")
-    if not re.match(r"^[A-Z0-9_-]+$", t):
-        return None
-    if len(t) < 3 or len(t) > 50:
-        return None
-    return t
-
-
-def main_keyboard():
-    return ReplyKeyboardMarkup([
-        ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["📱 Beli Nomor OTP", "🔑 Pakai Kode VOC"],
-        ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
-        ["📡 Pantau Kurir", "❓ Bantuan"]
-    ], resize_keyboard=True)
-
-
-def admin_keyboard():
-    return ReplyKeyboardMarkup([
-        ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["📱 Beli Nomor OTP", "🔑 Pakai Kode VOC"],
-        ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
-        ["📡 Pantau Kurir", "🔧 Admin Panel"],
-        ["❓ Bantuan"]
-    ], resize_keyboard=True)
-
-
-async def nasky_cek_single(nomor):
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post(
-                f"{NASKY_BASE}/api/cek",
-                headers={"X-API-Key": NASKY_API_KEY},
-                json={"code": "kopken", "nomor": nomor}
+def init_db():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                quota INTEGER DEFAULT 0,
+                saldo INTEGER DEFAULT 0,
+                total_cek INTEGER DEFAULT 0,
+                created_at INTEGER,
+                banned INTEGER DEFAULT 0
             )
-            return r.json()
-        except Exception as e:
-            return {"success": False, "detail": f"Network error: {e}"}
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS voc_codes (
+                code TEXT PRIMARY KEY,
+                quota INTEGER DEFAULT 3,
+                used INTEGER DEFAULT 0,
+                created_by INTEGER,
+                created_at INTEGER,
+                used_by INTEGER,
+                used_at INTEGER,
+                active INTEGER DEFAULT 1
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                type TEXT,
+                amount INTEGER,
+                status TEXT,
+                note TEXT,
+                timestamp INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_orders (
+                order_id TEXT PRIMARY KEY,
+                user_id INTEGER,
+                code TEXT,
+                label TEXT,
+                last_status INTEGER,
+                last_status_text TEXT,
+                last_eta TEXT,
+                last_driver TEXT,
+                last_driver_phone TEXT,
+                last_flag TEXT,
+                active INTEGER DEFAULT 1,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT,
+                status_code INTEGER,
+                status_text TEXT,
+                timestamp INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tarif_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                biaya INTEGER,
+                jam INTEGER,
+                timestamp INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_telemetry (
+                user_id INTEGER PRIMARY KEY,
+                proximity_enabled INTEGER DEFAULT 1,
+                proximity_km REAL DEFAULT 1.0,
+                stagnation_enabled INTEGER DEFAULT 1,
+                stagnation_min INTEGER DEFAULT 15,
+                live_loc_enabled INTEGER DEFAULT 0,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT,
+                event TEXT,
+                value INTEGER,
+                note TEXT,
+                timestamp INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_stagnation (
+                order_id TEXT PRIMARY KEY,
+                last_status INTEGER,
+                last_change_at INTEGER,
+                alerted_at INTEGER
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS otp_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                order_id INTEGER,
+                token TEXT,
+                phone TEXT,
+                service_name TEXT,
+                price INTEGER,
+                status TEXT,
+                otp_code TEXT,
+                created_at INTEGER
+            )
+        """)
+        # Migration: add saldo column if upgrading from old DB
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN saldo INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+    print(f"✅ Database initialized at: {DB_PATH}")
 
 
-async def cmd_start(update, ctx):
-    user = update.effective_user
-    db.create_user(user.id, user.username or "", user.first_name or "")
-    u = db.get_user(user.id)
-    kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    text = (
-        f"Halo {user.first_name}! 👋\n\n"
-        f"☕ *Bot Multi Fungsi*\n\n"
-        f"📊 Kuota kamu: *{u['quota']}x cek*\n"
-        f"💰 Saldo OTP kamu: *Rp {saldo:,}*\n\n"
-        f"*Fitur:*\n"
-        f"• ☕ Cek Nomor Kopi Kenangan\n"
-        f"• 🍔 ShopeeFood Tracker\n"
-        f"• 📊 Tarif ShopeeFood\n"
-        f"• 📡 Pantau Kurir\n"
-        f"• 📱 Beli Nomor OTP\n"
-        f"• 🔑 Redeem kode VOC\n\n"
-        f"Ketik `/help` untuk bantuan."
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-
-
-async def cmd_help(update, ctx):
-    text = (
-        "📖 *Bantuan*\n\n"
-        "*☕ Cek Nomor Kopi Kenangan:*\n"
-        "• Kirim nomor HP (1 atau banyak, pisah baris)\n\n"
-        "*🍔 ShopeeFood Tracker:*\n"
-        "• Kirim link tracker + label\n"
-        "• `/sfood` — Menu tracker\n\n"
-        "*📡 Pantau Kurir:*\n"
-        "• `/telemetry` — Menu Pantau Kurir\n"
-        "• `/sfood_metrics <order_id>` — Statistik order\n\n"
-        "*📊 Tarif:*\n"
-        "• `/tarif <angka>` — Input biaya layanan\n\n"
-        "*📱 OTP:*\n"
-        "• Klik tombol Beli Nomor OTP di keyboard\n\n"
-        "*Commands:*\n"
-        "/start, /help, /kuota, /sfood, /telemetry, /tarif"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_kuota(update, ctx):
-    user = update.effective_user
-    u = db.get_user(user.id)
-    if not u:
-        db.create_user(user.id, user.username or "", user.first_name or "")
-        u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    await update.message.reply_text(
-        f"📊 *Kuota Kamu*\n\n"
-        f"Sisa kuota: *{u['quota']}x cek*\n"
-        f"Total cek: {u['total_cek']}x\n"
-        f"💰 Saldo OTP: *Rp {saldo:,}*",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-
-async def handle_message(update, ctx):
-    text = (update.message.text or "").strip()
-    user = update.effective_user
-
-    if not db.get_user(user.id):
-        db.create_user(user.id, user.username or "", user.first_name or "")
-    u = db.get_user(user.id)
-
-    if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
-        await handle_sfood_message(update, ctx)
-        return
-
-    if text == "☕ Cek Nomor":
-        if u["quota"] <= 0:
-            await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
-        else:
-            await update.message.reply_text(
-                "Kirim nomor HP yang mau dicek, contoh:\n`081234567890`",
-                parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "📊 Kuota Saya":
-        await cmd_kuota(update, ctx)
-        return
-
-    if text == "📱 Beli Nomor OTP":
-        await cmd_otp_menu(update, ctx)
-        return
-
-    if text == "🔑 Pakai Kode VOC":
-        await update.message.reply_text("Kirim kode VOC kamu.\n\nFormat: `VOC-XXXXXX`",
-                                         parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "🍔 ShopeeFood":
-        await cmd_sfood(update, ctx)
-        return
-
-    if text == "🍔 Tambah Order":
-        await update.message.reply_text(
-            "Kirim link tracker ShopeeFood + label opsional.\n\n"
-            "<code>https://www.shopeefood.co.id/tracker?code=xxx&amp;orderId=yyy Label</code>",
-            parse_mode=ParseMode.HTML)
-        return
-
-    if text == "📋 List Order":
-        await cmd_sfood_list(update, ctx)
-        return
-
-    if text == "❌ Stop Order":
-        await update.message.reply_text(
-            "Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall",
-            parse_mode=ParseMode.HTML)
-        return
-
-    if text == "🔙 Menu Utama":
-        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=kb)
-        return
-
-    if text == "📊 Tarif ShopeeFood":
-        await update.message.reply_text(
-            "📊 <b>Tarif ShopeeFood</b>\n\n"
-            "<code>/tarif &lt;angka&gt;</code> — Input biaya\n"
-            "<code>/tarif_cek</code> — Cek status\n"
-            "<code>/tarif_stats</code> — Statistik",
-            parse_mode=ParseMode.HTML)
-        return
-
-    if text == "📡 Pantau Kurir":
-        await cmd_telemetry(update, ctx)
-        return
-
-    if text == "❓ Bantuan":
-        await cmd_help(update, ctx)
-        return
-
-    if text == "🔧 Admin Panel" and is_admin(user.id):
-        await cmd_admin(update, ctx)
-        return
-
-    text_upper = text.upper()
-    if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
-        success, message, quota = db.use_voc(text_upper, user.id)
-        if success:
-            await update.message.reply_text(
-                f"✅ *{message}*\n\nSekarang kamu punya *{db.get_user(user.id)['quota']}x* kuota.",
-                parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(f"❌ {message}")
-        return
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    if len(lines) == 1 and is_valid_phone(lines[0]):
-        if u["quota"] <= 0:
-            await update.message.reply_text("❌ Kuota habis.")
-            return
-        msg = await update.message.reply_text("🔍 Mengecek...")
-        start_time = time.time()
-        result = await nasky_cek_single(normalize_phone(lines[0]))
-        elapsed = time.time() - start_time
-        if not result.get("success"):
-            await msg.edit_text(f"❌ Error: {result.get('detail', 'Unknown')}")
-            return
-        d = result["data"]
-        status = d["status"]
-        phone_display = format_phone_display(d["phone"])
-        if status == "fresh":
-            db.use_quota(user.id)
-            db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
-        else:
-            db.add_transaction(user.id, "cek", 0, "success", f"{status} {d['phone']}")
-        new_quota = db.get_user(user.id)["quota"]
-        if status == "fresh":
-            reply = (f"📊 HASIL PENGECEKAN NOMOR\n\n"
-                     f"❌ BELUM TERDAFTAR [1]:\n{phone_display}\n\n"
-                     f"⏱️ Waktu: {elapsed:.2f} detik\n"
-                     f"💳 Sisa Kuota: {new_quota} Kredit")
-        elif status == "registered":
-            reply = (f"📊 HASIL PENGECEKAN NOMOR\n\n"
-                     f"✅ TERDAFTAR [1]:\n{phone_display} | {d.get('customer_name') or '-'}\n\n"
-                     f"⏱️ Waktu: {elapsed:.2f} detik\n"
-                     f"💳 Sisa Kuota: {new_quota} Kredit")
-        else:
-            reply = f"❓ Status tidak dikenal: `{status}`"
-        await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    valid = [normalize_phone(l) for l in lines if is_valid_phone(l)]
-    if valid:
-        if u["quota"] < len(valid):
-            await update.message.reply_text(f"❌ Kuota tidak cukup (butuh {len(valid)}x).")
-            return
-        msg = await update.message.reply_text(f"🔍 Mengecek {len(valid)} nomor...")
-        start_time = time.time()
-        fresh_list = []
-        reg_list = []
-        invalid_list = []
-        for nomor in valid:
-            r = await nasky_cek_single(nomor)
-            if not r.get("success"):
-                invalid_list.append(nomor)
-                continue
-            d = r["data"]
-            phone_display = format_phone_display(d["phone"])
-            if d["status"] == "fresh":
-                fresh_list.append(phone_display)
-                db.use_quota(user.id)
-                db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
-            elif d["status"] == "registered":
-                reg_list.append((phone_display, d.get("customer_name") or "-"))
-                db.add_transaction(user.id, "cek", 0, "success", f"REG {d['phone']}")
-            else:
-                invalid_list.append(phone_display)
-        elapsed = time.time() - start_time
-        new_quota = db.get_user(user.id)["quota"]
-        out_lines = ["📊 HASIL PENGECEKAN NOMOR", ""]
-        if reg_list:
-            out_lines.append(f"✅ TERDAFTAR [{len(reg_list)}]:")
-            for ph, nm in reg_list:
-                out_lines.append(f"{ph} | {nm}")
-            out_lines.append("")
-        if fresh_list:
-            out_lines.append(f"❌ BELUM TERDAFTAR [{len(fresh_list)}]:")
-            for ph in fresh_list:
-                out_lines.append(ph)
-            out_lines.append("")
-        if invalid_list:
-            out_lines.append(f"⚠️ INVALID [{len(invalid_list)}]:")
-            for ph in invalid_list:
-                out_lines.append(ph)
-            out_lines.append("")
-        out_lines.append(f"⏱️ Waktu: {elapsed:.2f} detik")
-        out_lines.append(f"💳 Sisa Kuota: {new_quota} Kredit")
-        await msg.edit_text("\n".join(out_lines))
-        file_out = ["=" * 40, "HASIL PENGECEKAN NOMOR", "=" * 40, ""]
-        if reg_list:
-            file_out.append(f"TERDAFTAR [{len(reg_list)}]:")
-            for ph, nm in reg_list:
-                file_out.append(f"{ph} | {nm}")
-            file_out.append("")
-        if fresh_list:
-            file_out.append(f"BELUM TERDAFTAR [{len(fresh_list)}]:")
-            for ph in fresh_list:
-                file_out.append(ph)
-            file_out.append("")
-        if invalid_list:
-            file_out.append(f"INVALID [{len(invalid_list)}]:")
-            for ph in invalid_list:
-                file_out.append(ph)
-            file_out.append("")
-        file_bytes = "\n".join(file_out).encode("utf-8")
-        await update.message.reply_document(document=file_bytes, filename="hasil_cek.txt")
-        return
-
-    await update.message.reply_text("❌ Format tidak dikenali.")
-
-
-async def cmd_admin(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    s = db.get_stats()
-    text = (
-        f"🔧 *Admin Panel*\n\n"
-        f"👥 Total users: {s['total_users']}\n"
-        f"☕ Total cek: {s['total_cek']}\n"
-        f"🔑 VOC aktif: {s['active_voc']}\n"
-        f"🔑 Total VOC: {s['total_voc']}\n\n"
-        f"*Generate VOC:* `/genvoc` `[kuota]` `[kode]`\n\n"
-        f"*ShopeeFood Admin:*\n"
-        f"`/sfood_users` — List user\n"
-        f"`/sfood_leaderboard` — Leaderboard\n"
-        f"`/sfood_userinfo <id>` — Detail user\n\n"
-        f"*Kelola:* `/revoke <kode>` `/addkuota <id> <n>` `/addsaldo <id> <n>`"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_genvoc(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    args = ctx.args or []
-    if not args:
-        for _ in range(10):
-            code = gen_voc_code()
-            if db.create_voc(code, DEFAULT_VOC_QUOTA, update.effective_user.id):
-                await update.message.reply_text(
-                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{DEFAULT_VOC_QUOTA}x*",
-                    parse_mode=ParseMode.MARKDOWN)
-                return
-        return
-    if len(args) == 1 and args[0].isdigit():
-        quota = int(args[0])
-        for _ in range(10):
-            code = gen_voc_code()
-            if db.create_voc(code, quota, update.effective_user.id):
-                await update.message.reply_text(
-                    f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{quota}x*",
-                    parse_mode=ParseMode.MARKDOWN)
-                return
-        return
-    if len(args) == 1:
-        custom = sanitize_voc_input(args[0])
-        if not custom:
-            await update.message.reply_text("❌ Kode tidak valid.")
-            return
-        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id):
-            await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {DEFAULT_VOC_QUOTA}x",
-                                             parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
-        return
-    if len(args) >= 2:
-        custom = sanitize_voc_input(args[0])
-        if not custom or not args[1].isdigit():
-            await update.message.reply_text("❌ Format: `/genvoc <KODE> <KUOTA>`",
-                                             parse_mode=ParseMode.MARKDOWN)
-            return
-        quota = int(args[1])
-        if db.create_voc(custom, quota, update.effective_user.id):
-            await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {quota}x",
-                                             parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
-
-
-async def cmd_listvoc(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    rows = db.list_voc_codes(20)
-    if not rows:
-        await update.message.reply_text("Belum ada kode VOC.")
-        return
-    lines = ["🔑 *20 Kode VOC Terakhir*\n"]
-    for r in rows:
-        status = "🟢" if r["active"] else "🔴"
-        lines.append(f"{status} `{r['code']}` — {r['quota']}x")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_revoke(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/revoke <kode>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    db.revoke_voc(ctx.args[0].upper())
-    await update.message.reply_text(f"✅ Kode `{ctx.args[0].upper()}` dinonaktifkan.",
-                                     parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_addkuota(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/addkuota <id> <n>`", parse_mode=ParseMode.MARKDOWN)
-        return
+@contextmanager
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     try:
-        uid = int(ctx.args[0])
-        amt = int(ctx.args[1])
-    except ValueError:
-        return
-    if not db.get_user(uid):
-        await update.message.reply_text("❌ User tidak ditemukan.")
-        return
-    db.add_quota(uid, amt)
-    new_q = db.get_user(uid)["quota"]
-    await update.message.reply_text(f"✅ Kuota user `{uid}` +{amt}. Total: {new_q}x",
-                                     parse_mode=ParseMode.MARKDOWN)
+        yield conn
+    finally:
+        conn.close()
 
 
-async def cmd_addsaldo(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/addsaldo <id> <n>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0])
-        amt = int(ctx.args[1])
-    except ValueError:
-        return
-    if not db.get_user(uid):
-        await update.message.reply_text("❌ User tidak ditemukan.")
-        return
-    db.add_saldo(uid, amt)
-    new_s = db.get_user(uid)["saldo"]
-    await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}",
-                                     parse_mode=ParseMode.MARKDOWN)
+# ----------------------------------------------------------------------
+# USER
+# ----------------------------------------------------------------------
+
+def get_user(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        return c.fetchone()
 
 
-async def cmd_stats(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    s = db.get_stats()
-    await update.message.reply_text(
-        f"📊 *Statistik*\n\n"
-        f"👥 Users: {s['total_users']}\n"
-        f"☕ Total cek: {s['total_cek']}\n"
-        f"🔑 VOC aktif: {s['active_voc']}\n"
-        f"🔑 VOC total: {s['total_voc']}",
-        parse_mode=ParseMode.MARKDOWN)
+def create_user(user_id, username, first_name):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT OR IGNORE INTO users (user_id, username, first_name, quota, saldo, created_at)
+            VALUES (?, ?, ?, 0, 0, ?)
+        """, (user_id, username, first_name, now))
+        conn.commit()
 
 
-async def cmd_users(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    users = db.list_all_users(limit=50)
-    if not users:
-        await update.message.reply_text("Belum ada user.")
-        return
-    import datetime as dtmod
-    lines = [f"👥 *Total Users: {len(users)}*\n"]
-    for u in users:
-        uname = f"@{u['username']}" if u['username'] else "(no uname)"
-        name = u['first_name'] or "(no name)"
-        dt = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
-        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Kuota: {u['quota']}x | Saldo: Rp {saldo:,} | {dt}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+def add_quota(user_id, amount):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET quota = quota + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
 
 
-async def cmd_userinfo(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/userinfo <id>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0])
-    except ValueError:
-        return
-    user, vocs = db.get_user_detail(uid)
-    if not user:
-        await update.message.reply_text(f"❌ User `{uid}` tidak ditemukan.")
-        return
-    import datetime as dtmod
-    dt = dtmod.datetime.fromtimestamp(user['created_at']).strftime("%d/%m/%Y %H:%M")
-    uname = f"@{user['username']}" if user['username'] else "(no uname)"
-    saldo = user['saldo'] if user and 'saldo' in user.keys() else 0
-    text = (
-        f"👤 *Detail User*\n\n"
-        f"ID: `{user['user_id']}`\n"
-        f"Username: {uname}\n"
-        f"Nama: {user['first_name'] or '-'}\n\n"
-        f"📊 Kuota: *{user['quota']}x*\n"
-        f"💰 Saldo OTP: *Rp {saldo:,}*\n"
-        f"☕ Total cek: {user['total_cek']}x\n"
-        f"📅 Daftar: {dt}\n\n"
-    )
-    if vocs:
-        text += f"🔑 *VOC dipakai ({len(vocs)}):*\n"
-        for v in vocs:
-            text += f"• `{v['code']}` — {v['quota']}x\n"
-    else:
-        text += "🔑 Belum pernah redeem VOC."
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+def use_quota(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT quota FROM users WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        if not row or row["quota"] <= 0:
+            return False
+        c.execute("UPDATE users SET quota = quota - 1, total_cek = total_cek + 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return True
 
 
-async def cmd_vocdetail(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/vocdetail <kode>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    code = ctx.args[0].upper()
-    voc, user = db.get_voc_detail(code)
-    if not voc:
-        await update.message.reply_text(f"❌ Kode `{code}` tidak ditemukan.")
-        return
-    import datetime as dtmod
-    dt = dtmod.datetime.fromtimestamp(voc['created_at']).strftime("%d/%m/%Y %H:%M")
-    text = (
-        f"🔑 *Detail Kode VOC*\n\n"
-        f"Kode: `{voc['code']}`\n"
-        f"Kuota: {voc['quota']}x\n"
-        f"Dibuat: {dt}\n"
-        f"Status: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n\n"
-    )
-    if user:
-        used_at = dtmod.datetime.fromtimestamp(voc['used_at']).strftime("%d/%m/%Y %H:%M") if voc['used_at'] else "-"
-        uname = f"@{user['username']}" if user['username'] else "(no uname)"
-        text += (
-            f"👤 *Dipakai oleh:*\n"
-            f"Nama: {user['first_name'] or '-'}\n"
-            f"Username: {uname}\n"
-            f"User ID: `{user['user_id']}`\n"
-            f"Redeem: {used_at}"
-        )
-    else:
-        text += "👤 Belum dipakai siapa pun."
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+def add_transaction(user_id, ttype, amount, status, note=""):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO transactions (user_id, type, amount, status, note, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (user_id, ttype, amount, status, note, int(time.time())))
+        conn.commit()
 
 
-async def error_handler(update, ctx):
-    logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
+def get_user_transactions(user_id, limit=10):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+                  (user_id, limit))
+        return c.fetchall()
 
 
-def main():
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN belum di-set")
-        return
-    if not NASKY_API_KEY:
-        print("❌ NASKY_API_KEY belum di-set")
-        return
-
-    db.init_db()
-
-    async def post_init(app):
-        app.bot_data["admin_ids"] = ADMIN_IDS
-        asyncio.create_task(tracker_worker(app.bot))
-        print("[SFOOD] Tracker worker started")
-
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("kuota", cmd_kuota))
-
-    app.add_handler(CommandHandler("sfood", cmd_sfood))
-    app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
-    app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
-    app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
-    app.add_handler(CommandHandler("sfood_users", cmd_sfood_users))
-    app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
-    app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
-
-    app.add_handler(CommandHandler("telemetry", cmd_telemetry))
-    app.add_handler(CommandHandler("pantau_on", cmd_pantau_on))
-    app.add_handler(CommandHandler("pantau_off", cmd_pantau_off))
-    app.add_handler(CommandHandler("jarak_set", cmd_jarak_set))
-    app.add_handler(CommandHandler("stuck_set", cmd_stuck_set))
-    app.add_handler(CommandHandler("sfood_metrics", cmd_sfood_metrics))
-    app.add_handler(CommandHandler("lokasi_saya", cmd_lokasi_saya))
-
-    app.add_handler(CommandHandler("tarif", cmd_tarif))
-    app.add_handler(CommandHandler("tarif_cek", cmd_tarif_cek))
-    app.add_handler(CommandHandler("tarif_stats", cmd_tarif_stats))
-
-    app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(CommandHandler("genvoc", cmd_genvoc))
-    app.add_handler(CommandHandler("listvoc", cmd_listvoc))
-    app.add_handler(CommandHandler("revoke", cmd_revoke))
-    app.add_handler(CommandHandler("addkuota", cmd_addkuota))
-    app.add_handler(CommandHandler("addsaldo", cmd_addsaldo))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CommandHandler("users", cmd_users))
-    app.add_handler(CommandHandler("userinfo", cmd_userinfo))
-    app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
-
-    app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
-    app.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=r"^otp_cancel_"))
-
-    app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
-    print("🤖 Bot jalan... Ctrl+C untuk stop")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+def list_all_users(limit=50):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT user_id, username, first_name, quota, saldo, total_cek, created_at
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
+        return c.fetchall()
 
 
-if __name__ == "__main__":
-    main()
+def get_user_detail(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = c.fetchone()
+        if not user:
+            return None, []
+        c.execute("""
+            SELECT code, quota, used_at
+            FROM voc_codes
+            WHERE used_by = ?
+            ORDER BY used_at DESC
+        """, (user_id,))
+        vocs = c.fetchall()
+        return user, vocs
+
+
+def get_all_user_ids():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE banned = 0")
+        return [r["user_id"] for r in c.fetchall()]
+
+
+# ----------------------------------------------------------------------
+# SALDO
+# ----------------------------------------------------------------------
+
+def add_saldo(user_id, amount):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
+
+
+def deduct_saldo(user_id, amount):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        if not row or row["saldo"] < amount:
+            return False
+        c.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
+        return True
+
+
+# ----------------------------------------------------------------------
+# OTP ORDERS
+# ----------------------------------------------------------------------
+
+def create_otp_order(user_id, order_id, token, phone, service_name, price):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO otp_orders (user_id, order_id, token, phone, service_name, price, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?)
+        """, (user_id, order_id, token, phone, service_name, price, int(time.time())))
+        conn.commit()
+        return c.lastrowid
+
+
+def get_otp_order(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM otp_orders WHERE order_id = ?", (order_id,))
+        return c.fetchone()
+
+
+def update_otp_order_status(order_id, status, otp_code=None):
+    with get_conn() as conn:
+        c = conn.cursor()
+        if otp_code:
+            c.execute("UPDATE otp_orders SET status = ?, otp_code = ? WHERE order_id = ?", (status, otp_code, order_id))
+        else:
+            c.execute("UPDATE otp_orders SET status = ? WHERE order_id = ?", (status, order_id))
+        conn.commit()
+
+
+def get_active_otp_orders_by_user(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM otp_orders WHERE user_id = ? AND status = 'waiting' ORDER BY created_at DESC", (user_id,))
+        return c.fetchall()
+
+
+# ----------------------------------------------------------------------
+# VOC CODES
+# ----------------------------------------------------------------------
+
+def create_voc(code, quota, created_by):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        try:
+            c.execute("""
+                INSERT INTO voc_codes (code, quota, used, created_by, created_at, active)
+                VALUES (?, ?, 0, ?, ?, 1)
+            """, (code, quota, created_by, now))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def get_voc(code):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes WHERE code = ?", (code,))
+        return c.fetchone()
+
+
+def use_voc(code, user_id):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes WHERE code = ?", (code,))
+        row = c.fetchone()
+        if not row:
+            return False, "Kode tidak ditemukan.", 0
+        if not row["active"]:
+            return False, "Kode sudah tidak aktif.", 0
+        if row["used_by"] is not None and row["used_by"] != user_id:
+            return False, "Kode sudah dipakai user lain.", 0
+        if row["used_by"] == user_id:
+            return False, "Kode ini sudah kamu pakai.", 0
+        c.execute("""
+            UPDATE voc_codes SET used_by = ?, used_at = ?, active = 0 WHERE code = ?
+        """, (user_id, now, code))
+        c.execute("UPDATE users SET quota = quota + ? WHERE user_id = ?",
+                  (row["quota"], user_id))
+        conn.commit()
+        return True, f"Kode berhasil dipakai! Kuota +{row['quota']}x cek.", row["quota"]
+
+
+def list_voc_codes(limit=20):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes ORDER BY created_at DESC LIMIT ?", (limit,))
+        return c.fetchall()
+
+
+def get_voc_detail(code):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM voc_codes WHERE code = ?", (code,))
+        voc = c.fetchone()
+        if not voc:
+            return None, None
+        if voc["used_by"]:
+            c.execute("SELECT user_id, username, first_name FROM users WHERE user_id = ?",
+                      (voc["used_by"],))
+            user = c.fetchone()
+            return voc, user
+        return voc, None
+
+
+def revoke_voc(code):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE voc_codes SET active = 0 WHERE code = ?", (code,))
+        conn.commit()
+
+
+def get_stats():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) as total FROM users")
+        total = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as n FROM transactions WHERE type = 'cek'")
+        total_cek = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) as n FROM voc_codes WHERE active = 1")
+        active_voc = c.fetchone()["n"]
+        c.execute("SELECT COUNT(*) as n FROM voc_codes")
+        total_voc = c.fetchone()["n"]
+        return {
+            "total_users": total,
+            "total_cek": total_cek,
+            "active_voc": active_voc,
+            "total_voc": total_voc
+        }
+
+
+# ----------------------------------------------------------------------
+# SHOPEEFOOD TRACKER
+# ----------------------------------------------------------------------
+
+def sfood_add_order(user_id, order_id, code, label, last_status,
+                    last_status_text, last_eta, last_driver, last_driver_phone):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_orders
+            (order_id, user_id, code, label, last_status, last_status_text,
+             last_eta, last_driver, last_driver_phone, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """, (order_id, user_id, code, label, last_status, last_status_text,
+              last_eta, last_driver, last_driver_phone, now, now))
+        conn.commit()
+
+
+def sfood_order_exists(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM sfood_orders WHERE order_id = ? AND active = 1", (order_id,))
+        return c.fetchone() is not None
+
+
+def sfood_get_active_orders():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_orders WHERE active = 1")
+        return c.fetchall()
+
+
+def sfood_get_orders_by_user(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_orders WHERE user_id = ? AND active = 1 ORDER BY created_at DESC", (user_id,))
+        return c.fetchall()
+
+
+def sfood_update_status(order_id, status_code, eta, driver, driver_phone):
+    now = int(time.time())
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            UPDATE sfood_orders
+            SET last_status = ?, last_eta = ?, last_driver = ?, last_driver_phone = ?, updated_at = ?
+            WHERE order_id = ?
+        """, (status_code, eta, driver, driver_phone, now, order_id))
+        conn.commit()
+
+
+def sfood_update_flag(order_id, flag):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sfood_orders SET last_flag = ? WHERE order_id = ?", (flag, order_id))
+        conn.commit()
+
+
+def sfood_add_log(order_id, status_code, status_text):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_status_log (order_id, status_code, status_text, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (order_id, status_code, status_text, int(time.time())))
+        conn.commit()
+
+
+def sfood_stop_order(order_id, user_id=None):
+    with get_conn() as conn:
+        c = conn.cursor()
+        if user_id:
+            c.execute("UPDATE sfood_orders SET active = 0 WHERE order_id = ? AND user_id = ?", (order_id, user_id))
+        else:
+            c.execute("UPDATE sfood_orders SET active = 0 WHERE order_id = ?", (order_id,))
+        conn.commit()
+        return c.rowcount > 0
+
+
+def sfood_stop_all_user(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sfood_orders SET active = 0 WHERE user_id = ? AND active = 1", (user_id,))
+        conn.commit()
+        return c.rowcount
+
+
+# ----------------------------------------------------------------------
+# SHOPEEFOOD ADMIN
+# ----------------------------------------------------------------------
+
+def sfood_list_all_users():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                u.user_id, u.username, u.first_name,
+                COUNT(DISTINCT so.order_id) as total_orders,
+                COUNT(DISTINCT CASE WHEN so.active = 1 THEN so.order_id END) as active_orders,
+                MAX(so.created_at) as last_order_at
+            FROM users u
+            INNER JOIN sfood_orders so ON so.user_id = u.user_id
+            GROUP BY u.user_id
+            ORDER BY total_orders DESC, last_order_at DESC
+        """)
+        return c.fetchall()
+
+
+def sfood_get_user_history(user_id, limit=20):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+        return c.fetchall()
+
+
+def sfood_get_leaderboard(limit=20):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                u.user_id, u.username, u.first_name,
+                COUNT(DISTINCT so.order_id) as total_orders,
+                SUM(CASE WHEN so.active = 1 THEN 1 ELSE 0 END) as active_count,
+                MAX(so.created_at) as last_order_at
+            FROM users u
+            INNER JOIN sfood_orders so ON so.user_id = u.user_id
+            GROUP BY u.user_id
+            ORDER BY total_orders DESC
+            LIMIT ?
+        """, (limit,))
+        return c.fetchall()
+
+
+def sfood_get_global_stats():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(DISTINCT user_id) as total FROM sfood_orders")
+        total_users = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as total FROM sfood_orders")
+        total_orders = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as total FROM sfood_orders WHERE active = 1")
+        active_orders = c.fetchone()["total"]
+        c.execute("SELECT COUNT(*) as total FROM sfood_orders WHERE active = 0")
+        completed_orders = c.fetchone()["total"]
+        return {
+            "total_users": total_users,
+            "total_orders": total_orders,
+            "active_orders": active_orders,
+            "completed_orders": completed_orders,
+        }
+
+
+# ----------------------------------------------------------------------
+# TARIF
+# ----------------------------------------------------------------------
+
+def tarif_add(user_id, biaya):
+    now_ts = int(time.time())
+    jam = datetime.datetime.now().hour
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO tarif_logs (user_id, biaya, jam, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, biaya, jam, now_ts))
+        conn.commit()
+
+
+def tarif_get_latest(user_id=None):
+    with get_conn() as conn:
+        c = conn.cursor()
+        if user_id:
+            c.execute("SELECT * FROM tarif_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,))
+        else:
+            c.execute("SELECT * FROM tarif_logs ORDER BY timestamp DESC LIMIT 1")
+        return c.fetchone()
+
+
+def tarif_get_avg_for_hour(jam):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT AVG(biaya) as avg_b, COUNT(*) as cnt FROM tarif_logs WHERE jam = ?", (jam,))
+        row = c.fetchone()
+        if not row or row["cnt"] == 0 or row["avg_b"] is None:
+            return None, 0
+        return int(row["avg_b"]), row["cnt"]
+
+
+def tarif_get_stats():
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) as total, MIN(biaya) as min_b, MAX(biaya) as max_b, AVG(biaya) as avg_b FROM tarif_logs")
+        row = c.fetchone()
+        total = row["total"] or 0
+        min_b = row["min_b"]
+        max_b = row["max_b"]
+        avg_b = int(row["avg_b"]) if row["avg_b"] else 0
+
+        c.execute("""
+            SELECT jam, AVG(biaya) as avg_b, COUNT(*) as cnt
+            FROM tarif_logs
+            GROUP BY jam
+            HAVING cnt >= 1
+            ORDER BY avg_b ASC
+            LIMIT 3
+        """)
+        cheapest_hours = c.fetchall()
+
+        c.execute("""
+            SELECT jam, AVG(biaya) as avg_b, COUNT(*) as cnt
+            FROM tarif_logs
+            GROUP BY jam
+            HAVING cnt >= 1
+            ORDER BY avg_b DESC
+            LIMIT 3
+        """)
+        expensive_hours = c.fetchall()
+
+        return {
+            "total": total,
+            "min": min_b,
+            "max": max_b,
+            "avg": avg_b,
+            "cheapest": cheapest_hours,
+            "expensive": expensive_hours,
+        }
+
+
+# ----------------------------------------------------------------------
+# TELEMETRY
+# ----------------------------------------------------------------------
+
+def tel_get_settings(user_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_telemetry WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        if not row:
+            now = int(time.time())
+            c.execute("""
+                INSERT INTO sfood_telemetry (user_id, created_at, updated_at)
+                VALUES (?, ?, ?)
+            """, (user_id, now, now))
+            conn.commit()
+            c.execute("SELECT * FROM sfood_telemetry WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+        return row
+
+
+def tel_update_settings(user_id, **kwargs):
+    allowed = ["proximity_enabled", "proximity_km",
+               "stagnation_enabled", "stagnation_min", "live_loc_enabled"]
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return False
+    now = int(time.time())
+    fields = ", ".join(f"{k} = ?" for k in updates.keys())
+    values = list(updates.values()) + [now, user_id]
+    with get_conn() as conn:
+        c = conn.cursor()
+        tel_get_settings(user_id)
+        c.execute(f"UPDATE sfood_telemetry SET {fields}, updated_at = ? WHERE user_id = ?", values)
+        conn.commit()
+        return True
+
+
+def stag_get(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_stagnation WHERE order_id = ?", (order_id,))
+        return c.fetchone()
+
+
+def stag_set(order_id, last_status, last_change_at):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_stagnation (order_id, last_status, last_change_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(order_id) DO UPDATE SET
+                last_status = excluded.last_status,
+                last_change_at = excluded.last_change_at,
+                alerted_at = NULL
+        """, (order_id, last_status, last_change_at))
+        conn.commit()
+
+
+def stag_mark_alerted(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sfood_stagnation SET alerted_at = ? WHERE order_id = ?",
+                  (int(time.time()), order_id))
+        conn.commit()
+
+
+def metrics_add(order_id, event, value=0, note=""):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sfood_metrics (order_id, event, value, note, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+        """, (order_id, event, value, note, int(time.time())))
+        conn.commit()
+
+
+def metrics_get(order_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sfood_metrics WHERE order_id = ? ORDER BY timestamp ASC", (order_id,))
+        return c.fetchall()
