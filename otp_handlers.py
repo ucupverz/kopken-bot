@@ -59,7 +59,6 @@ async def nasky_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}"}
 
-# --- FUNGSI UI BOX PESANAN DENGAN PROGRESS BAR ---
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = time_left // 60
     detik = time_left % 60
@@ -171,7 +170,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             else:
                 db.add_saldo(user.id, total)
                 error_msg = res.get('error', res.get('message', 'Unknown error'))
-                await update.message.reply_text(f"❌ Gagal membuat pesanan. Server Dehuyz bilang: <b>{error_msg}</b>\n\nSaldo Anda dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+                await update.message.reply_text(f"❌ Gagal membuat pesanan. Server: <b>{error_msg}</b>\n\nSaldo dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
                 ctx.user_data['is_processing'] = False
                 ctx.user_data.clear()
                 return
@@ -190,11 +189,9 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         
-        # Jalanin Timer
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
-        # === FITUR TOMBOL CEK KOPKEN ===
         if "kopken" in service_name.lower() and "filter" not in service_name.lower():
             promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya sekarang?\n(Biaya Rp 200 jika FRESH, GRATIS jika sudah terdaftar)."
             cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{ph}")]])
@@ -218,19 +215,17 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     while True:
-        await asyncio.sleep(5) # Update tiap 5 detik
+        await asyncio.sleep(5)
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
         if time_left <= 0:
             break
             
-        # Cek status pesanan dari DB
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
             break
             
-        # Update UI dengan waktu yang beneran mundur
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
@@ -282,6 +277,29 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                     await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML)
                 except Exception:
                     await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML)
+
+async def handle_cancel_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    last_order = ctx.user_data.get('last_order')
+    
+    if not last_order:
+        await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
+        return
+        
+    await update.message.reply_text("⏳ Membatalkan pesanan...")
+    res, code = await wahub_client.cancel_order(last_order['order_id'])
+    
+    if code == 200:
+        refund = last_order.get('price', 0)
+        db.add_saldo(user.id, refund)
+        db.update_otp_order_status(last_order['order_id'], 'cancelled')
+        ctx.user_data['last_order'] = None
+        
+        await update.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} dikembalikan.")
+        kb = await get_otp_keyboard()
+        await update.message.reply_text("Menu OTP:", reply_markup=kb)
+    else:
+        await update.message.reply_text("❌ Gagal membatalkan pesanan. Coba lagi nanti.")
 
 async def handle_ganti_nomor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
