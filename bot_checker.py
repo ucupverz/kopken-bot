@@ -771,14 +771,10 @@ def main():
         asyncio.create_task(tracker_worker(app.bot))
         print("[SFOOD] Tracker worker started")
         
-        # Set Webhook Telegram
-        url_webhook = f"{os.getenv('RAILWAY_PUBLIC_DOMAIN', 'http://localhost')}/telegram-webhook"
+        # GANTI URL DI BAWAH INI PAKAI URL RAILWAY LU
+        url_webhook = "https://okezones-bot.up.railway.app/telegram-webhook" 
         await app.bot.set_webhook(url=url_webhook)
         print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
-
-    # Build Bot Application
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    bot_application = app
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
