@@ -26,7 +26,7 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"📱 <b>Menu WhatsApp OTP</b>\n\n"
         f"💰 Saldo Anda: <b>Rp {saldo:,}</b>\n\n"
         f"Silakan pilih layanan di keyboard bawah.\n"
-        f"• <b>Direct Buy</b>: Langsung bayar via QRIS.\n"
+        f"• <b>Direct Buy</b>: Langsung bayar via QRIS (jika saldo kurang).\n"
         f"• <b>Deposit</b>: Isi saldo dulu (min Rp 5.000)."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=otp_keyboard())
@@ -57,13 +57,54 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     harga_satuan = target_service['price'] + MARGIN
     total = harga_satuan * qty
     
-    ctx.user_data['buy_qty'] = qty
-    ctx.user_data['buy_total'] = total
-    ctx.user_data['buy_id'] = target_service['id']
-    ctx.user_data['buy_state'] = None 
+    u = db.get_user(user.id)
+    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
-    msg = await update.message.reply_text(f"⏳ Memproses QRIS untuk Rp {total:,}...", parse_mode=ParseMode.HTML)
-    asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, total, ctx, is_direct_buy=True))
+    # Cek apakah saldo user cukup
+    if saldo >= total:
+        # --- JIKA SALDO CUKUP: LANGSUNG BELI ---
+        if not db.deduct_saldo(user.id, total):
+            await update.message.reply_text("❌ Gagal memotong saldo.")
+            return
+            
+        msg = await update.message.reply_text(f"⏳ Saldo cukup. Memproses pembelian {qty} nomor...", parse_mode=ParseMode.HTML)
+        
+        service_id = target_service['id']
+        numbers_bought = []
+        
+        for _ in range(qty):
+            res, code = await wahub_client.rent_number(service_id)
+            if code == 200:
+                db.create_otp_order(user.id, res['order_id'], res['token'], res['phone'], service_name, harga_satuan)
+                numbers_bought.append((res['order_id'], res['token'], res['phone']))
+            else:
+                await msg.edit_text("❌ Gagal menyewa nomor dari provider. Saldo Anda telah dikembalikan.")
+                db.add_saldo(user.id, total) # Refund total
+                ctx.user_data.clear()
+                return
+                
+        txt = f"✅ <b>Pembelian Berhasil! Nomor Anda:</b>\n\n"
+        for i, (oid, tkn, ph) in enumerate(numbers_bought, 1):
+            txt += f"{i}. <code>{ph}</code>\n"
+            asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name))
+        await msg.edit_text(txt, parse_mode=ParseMode.HTML)
+        
+    else:
+        # --- JIKA SALDO KURANG: MINTA QRIS ---
+        await update.message.reply_text(
+            f"💰 Saldo Anda: Rp {saldo:,}\n"
+            f"💸 Total Harga: Rp {total:,}\n\n"
+            f"Saldo tidak cukup. Silakan bayar via QRIS di bawah ini untuk melanjutkan.", 
+            parse_mode=ParseMode.HTML
+        )
+        
+        ctx.user_data['buy_qty'] = qty
+        ctx.user_data['buy_total'] = total
+        ctx.user_data['buy_id'] = target_service['id']
+        
+        asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, total, ctx, is_direct_buy=True))
+
+    ctx.user_data['buy_state'] = None # Reset state
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -94,7 +135,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
     qris_bytes = result["image"]
     caption_dehuy = result["caption"]
     
-    # Ngirim PERSIS kaya dehuyz, plus tambahan tombol Cek Status
     keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
     
     qris_msg = await bot.send_photo(
@@ -109,13 +149,13 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
         is_paid_status = await dehuyz_automation.wait_for_payment(amount)
         
         if is_paid_status == "success":
-            # Ubah caption jadi Lunas
             try:
                 await bot.edit_message_caption(
                     chat_id=chat_id, 
                     message_id=qris_msg.message_id, 
                     caption=f"✅ <b>Topup Rp{amount:,} berhasil, saldo sudah masuk.</b>",
-                    parse_mode=ParseMode.HTML
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=None
                 )
             except Exception:
                 pass
@@ -143,7 +183,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 await bot.send_message(chat_id, f"✅ Deposit Berhasil! Saldo masuk Rp {amount:,}.\nTotal Saldo: Rp {u['saldo']:,}")
                 
         elif is_paid_status == "timeout":
-            # Ubah caption jadi Kadaluarsa
             try:
                 await bot.edit_message_caption(
                     chat_id=chat_id, 
@@ -157,14 +196,9 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
 
     asyncio.create_task(bg_wait_and_process())
 
-# Handler buat tombol inline "Cek Status"
 async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
-
-# ... (fungsi handle_buy_callback, poll_otp_bg, handle_cancel_callback, dll biarkan seperti sebelumnya) ...
-async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    pass
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name):
     res, status = await wahub_client.check_otp(token, timeout=60)
@@ -207,6 +241,9 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name):
                     text=f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk dalam 2 menit. Pesanan dibatalkan dan saldo Rp {db_order['price']:,} telah dikembalikan 100%.",
                     parse_mode=ParseMode.HTML
                 )
+
+async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    pass
 
 async def handle_cancel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pass
