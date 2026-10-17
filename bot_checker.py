@@ -6,7 +6,7 @@ import string
 import re
 import time
 import httpx
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler
@@ -14,6 +14,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 import database as db
+import wahub_client
 
 from sfood_handlers import (
     cmd_sfood, cmd_sfood_list, cmd_sfood_stop,
@@ -29,7 +30,10 @@ from sfood_telemetry import (
     cmd_sfood_metrics, cmd_lokasi_saya, handle_live_location
 )
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
-from otp_handlers import cmd_otp_menu, handle_buy_callback, handle_cancel_callback
+from otp_handlers import (
+    cmd_otp_menu, handle_buy_callback, handle_cancel_callback, 
+    handle_all_services, handle_back_menu, poll_otp_bg
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
@@ -88,8 +92,8 @@ def sanitize_voc_input(text):
 
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["📱 Beli Nomor OTP", "🔑 Pakai Kode VOC"],
+        ["☕ Cek Kopken", "📊 Kuota Saya"],
+        ["📱 WhatsApp OTP", "🔑 Pakai Kode VOC"],
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "❓ Bantuan"]
     ], resize_keyboard=True)
@@ -97,11 +101,18 @@ def main_keyboard():
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
-        ["☕ Cek Nomor", "📊 Kuota Saya"],
-        ["📱 Beli Nomor OTP", "🔑 Pakai Kode VOC"],
+        ["☕ Cek Kopken", "📊 Kuota Saya"],
+        ["📱 WhatsApp OTP", "🔑 Pakai Kode VOC"],
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "🔧 Admin Panel"],
         ["❓ Bantuan"]
+    ], resize_keyboard=True)
+
+
+def otp_keyboard():
+    return ReplyKeyboardMarkup([
+        ["🛒 Shopee", "📱 Kopken"],
+        ["📋 Lihat Semua Layanan", "🔙 Kembali ke Menu"]
     ], resize_keyboard=True)
 
 
@@ -155,7 +166,7 @@ async def cmd_help(update, ctx):
         "*📊 Tarif:*\n"
         "• `/tarif <angka>` — Input biaya layanan\n\n"
         "*📱 OTP:*\n"
-        "• Klik tombol Beli Nomor OTP di keyboard\n\n"
+        "• Klik tombol WhatsApp OTP di keyboard\n\n"
         "*Commands:*\n"
         "/start, /help, /kuota, /sfood, /telemetry, /tarif"
     )
@@ -190,7 +201,8 @@ async def handle_message(update, ctx):
         await handle_sfood_message(update, ctx)
         return
 
-    if text == "☕ Cek Nomor":
+    # --- HANDLER KEYBOARD MENU UTAMA ---
+    if text == "☕ Cek Kopken":
         if u["quota"] <= 0:
             await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
         else:
@@ -203,7 +215,7 @@ async def handle_message(update, ctx):
         await cmd_kuota(update, ctx)
         return
 
-    if text == "📱 Beli Nomor OTP":
+    if text == "📱 WhatsApp OTP":
         await cmd_otp_menu(update, ctx)
         return
 
@@ -233,14 +245,6 @@ async def handle_message(update, ctx):
             parse_mode=ParseMode.HTML)
         return
 
-    if text == "🔙 Menu Utama":
-        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=kb)
-        return
-
     if text == "📊 Tarif ShopeeFood":
         await update.message.reply_text(
             "📊 <b>Tarif ShopeeFood</b>\n\n"
@@ -261,6 +265,85 @@ async def handle_message(update, ctx):
     if text == "🔧 Admin Panel" and is_admin(user.id):
         await cmd_admin(update, ctx)
         return
+
+    # --- HANDLER KEYBOARD DINAMIS OTP ---
+    if text == "🔙 Kembali ke Menu":
+        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+        await update.message.reply_text(
+            f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if text == "📋 Lihat Semua Layanan":
+        services = await wahub_client.get_services()
+        if not services:
+            await update.message.reply_text("❌ Gagal mengambil daftar layanan.")
+            return
+            
+        keyboard = []
+        for s in services:
+            if s['stock'] > 0:
+                harga_jual = s['price'] + 1000 
+                btn_text = f"{s['name']} | Rp {harga_jual:,} (Stok: {s['stock']})"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{s['name']}")])
+            else:
+                keyboard.append([InlineKeyboardButton(f"{s['name']} (Habis)", callback_data="otp_none")])
+                
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("📋 <b>Pilih Layanan:</b>", parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        return
+        
+    if text in ["🛒 Shopee", "📱 Kopken"]:
+        nama_layanan = text.replace("🛒 ", "").replace("📱 ", "") 
+        services = await wahub_client.get_services()
+        
+        target_service = next((s for s in services if s['name'].lower() == nama_layanan.lower()), None)
+        
+        if not target_service:
+            await update.message.reply_text(f"❌ Layanan {nama_layanan} tidak ditemukan di API.")
+            return
+            
+        service_id = target_service['id']
+        harga_jual = target_service['price'] + 1000
+        service_name = target_service['name']
+        
+        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+        if saldo < harga_jual:
+            await update.message.reply_text(f"❌ Saldo tidak cukup. Sisa: Rp {saldo:,}. Butuh: Rp {harga_jual:,}.")
+            return
+            
+        if not db.deduct_saldo(user.id, harga_jual):
+            await update.message.reply_text("❌ Gagal memotong saldo.")
+            return
+            
+        msg = await update.message.reply_text("⏳ Sedang menyewa nomor...")
+        
+        res, status_code = await wahub_client.rent_number(service_id)
+        if status_code != 200:
+            db.add_saldo(user.id, harga_jual)
+            error_msg = res.get('detail', res.get('message', 'Error sistem.'))
+            await msg.edit_text(f"❌ Gagal: {error_msg}\n\nSaldo dikembalikan.")
+            return
+            
+        order_id = res['order_id']
+        token = res['token']
+        phone = res['phone']
+        
+        db.create_otp_order(user.id, order_id, token, phone, service_name, harga_jual)
+        
+        text_msg = (
+            f"✅ <b>Nomor Berhasil Disewa!</b>\n\n"
+            f"📱 Layanan: {service_name}\n"
+            f"📞 Nomor: <code>{phone}</code>\n\n"
+            f"⏳ Silakan gunakan nomor ini. Bot otomatis mendeteksi kode (maks 2 menit)."
+        )
+        keyboard = [[InlineKeyboardButton("❌ Batalkan & Refund", callback_data=f"otp_cancel_{order_id}")]]
+        await msg.edit_text(text_msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, order_id, token, service_name))
+        return
+    # --- END HANDLER KEYBOARD DINAMIS OTP ---
 
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
@@ -674,6 +757,8 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
     app.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=r"^otp_cancel_"))
+    app.add_handler(CallbackQueryHandler(handle_all_services, pattern=r"^otp_all$")) 
+    app.add_handler(CallbackQueryHandler(handle_back_menu, pattern=r"^otp_back$"))   
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
