@@ -101,8 +101,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         await update.message.reply_text("❌ Layanan tidak ditemukan.")
         ctx.user_data['is_processing'] = False
         ctx.user_data.clear()
-        kb_bawah = await get_otp_keyboard()
-        await update.message.reply_text("Menu OTP:", reply_markup=kb_bawah)
+        await update.message.reply_text("Menu OTP:", reply_markup=await get_otp_keyboard())
         return
 
     if target_service['stock'] < qty:
@@ -139,16 +138,17 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 numbers_bought.append((order_id, token, phone))
             else:
                 db.add_saldo(user.id, total)
-                await msg.edit_text("❌ Gagal membuat pesanan (Stok habis / API error). Saldo Anda dikembalikan.", reply_markup=kb_bawah)
+                await update.message.reply_text("❌ Gagal membuat pesanan (Stok habis / API error). Saldo Anda dikembalikan.", reply_markup=kb_bawah)
                 ctx.user_data['is_processing'] = False
                 ctx.user_data.clear()
                 return
                 
-        txt = f"✅ <b>Pesanan Dibuat! Menunggu Nomor dari Provider...</b>\n\n"
+        # === KIRIM PESAN BARU, JANGAN EDIT ===
+        txt = f"✅ <b>Pembelian Berhasil! Nomor Anda:</b>\n\n"
         for i, (oid, tkn, ph) in enumerate(numbers_bought, 1):
-            txt += f"{i}. Order ID: <code>{oid}</code>\n"
+            txt += f"{i}. <code>{ph}</code>\n"
             
-        await msg.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+        await update.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
         
         oid, tkn, ph = numbers_bought[0]
         ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": service_name, "price": total}
@@ -157,10 +157,13 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         await ctx.bot.send_message(
             chat_id=user.id, 
-            text=f"⏳ <b>Menunggu Nomor HP dari Provider...</b>\n\nOrder ID: <code>{oid}</code>\nLayanan: {service_name}", 
+            text=f"⏳ <b>Menunggu OTP...</b>\n\nOrder ID: <code>{oid}</code>\nLayanan: {service_name}", 
             parse_mode=ParseMode.HTML, 
             reply_markup=order_kb
         )
+        
+        # Jalanin polling OTP di background
+        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg.message_id))
         
     else:
         await update.message.reply_text(
