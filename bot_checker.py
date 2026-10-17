@@ -275,10 +275,16 @@ async def handle_message(update, ctx):
         return
         
     if text == "📋 Cek Pesanan":
+        # Cegah cek pesanan kalau ada proses lain
+        if ctx.user_data.get('is_processing'):
+            await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
+            return
+            
         last_order = ctx.user_data.get('last_order')
         if not last_order:
             await update.message.reply_text("❌ Tidak ada pesanan aktif.")
             return
+            
         status = "Menunggu OTP"
         if last_order.get('status') == 'success':
             status = "Selesai (OTP Diterima)"
@@ -292,7 +298,7 @@ async def handle_message(update, ctx):
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
         return
-
+    
     # --- HANDLER DETEKSI TOMBOL LAYANAN (🛒) ---
     if text.startswith("🛒 "):
         # Regex ini lebih kuat buat nangkep nama layanan dengan spasi (misal: "Kopken Filter")

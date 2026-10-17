@@ -82,18 +82,25 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
     user = update.effective_user
+    
+    # SISTEM LOCK: Cegah double click
+    if ctx.user_data.get('is_processing'):
+        await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
+        return
+    ctx.user_data['is_processing'] = True
+
     service_name = ctx.user_data.get('buy_service')
     if not service_name:
+        ctx.user_data['is_processing'] = False
         return
         
     services = await wahub_client.get_services()
-    # Validasi nama layanan persis
     target_service = next((s for s in services if s['name'].lower() == service_name.lower()), None)
     
     if not target_service:
         await update.message.reply_text("❌ Layanan tidak ditemukan atau sedang tidak tersedia.")
+        ctx.user_data['is_processing'] = False
         ctx.user_data.clear()
-        # Balikin keyboard
         kb_bawah = await get_otp_keyboard()
         await update.message.reply_text("Menu OTP:", reply_markup=kb_bawah)
         return
@@ -109,6 +116,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     if saldo >= total:
         if not db.deduct_saldo(user.id, total):
             await update.message.reply_text("❌ Gagal memotong saldo.")
+            ctx.user_data['is_processing'] = False
             return
             
         msg = await update.message.reply_text(f"⏳ Saldo cukup. Memproses pembelian {qty} nomor...", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
@@ -122,6 +130,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             else:
                 await msg.edit_text("❌ Gagal menyewa nomor dari provider. Saldo Anda telah dikembalikan.")
                 db.add_saldo(user.id, total)
+                ctx.user_data['is_processing'] = False
                 ctx.user_data.clear()
                 return
                 
@@ -166,6 +175,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, total, ctx, is_direct_buy=True))
 
     ctx.user_data['buy_state'] = None
+    ctx.user_data['is_processing'] = False # Buka Lock
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = "💰 <b>Deposit Saldo OTP</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
