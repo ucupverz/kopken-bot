@@ -10,10 +10,19 @@ import dehuyz_automation
 QUICK_SERVICES = ["Kopken", "Kopken Filter", "Shopee", "Shopee Filter"] 
 MARGIN = 700
 
-def otp_keyboard():
+async def get_otp_keyboard():
+    """Mengambil stok terbaru dan membuat keyboard dinamis."""
+    services = await wahub_client.get_services()
+    stock_map = {s['name']: s['stock'] for s in services if s['name'] in QUICK_SERVICES}
+    
+    k_stok = stock_map.get("Kopken", 0)
+    kf_stok = stock_map.get("Kopken Filter", 0)
+    s_stok = stock_map.get("Shopee", 0)
+    sf_stok = stock_map.get("Shopee Filter", 0)
+    
     return ReplyKeyboardMarkup([
-        ["🛒 Kopken", "🛒 Kopken Filter"],
-        ["🛒 Shopee", "🛒 Shopee Filter"],
+        [f"🛒 Kopken ({k_stok})", f"🛒 Kopken Filter ({kf_stok})"],
+        [f"🛒 Shopee ({s_stok})", f"🛒 Shopee Filter ({sf_stok})"],
         ["💰 Deposit Saldo", "🔙 Kembali ke Menu"]
     ], resize_keyboard=True)
 
@@ -22,23 +31,18 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
+    # Ambil keyboard yang ada stoknya
+    kb = await get_otp_keyboard()
+    
     text = (
         f"📱 <b>Menu WhatsApp OTP</b>\n\n"
         f"💰 Saldo Anda: <b>Rp {saldo:,}</b>\n\n"
         f"Silakan pilih layanan di keyboard bawah.\n"
-        f"• <b>Direct Buy</b>: Langsung bayar via QRIS (jika saldo kurang).\n"
+        f"• <b>Direct Buy</b>: Langsung bayar via QRIS.\n"
         f"• <b>Deposit</b>: Isi saldo dulu (min Rp 5.000)."
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=otp_keyboard())
-
-async def handle_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, service_name: str):
-    await update.message.reply_text(
-        f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
-        parse_mode=ParseMode.HTML,
-        reply_markup=None
-    )
-    ctx.user_data['buy_service'] = service_name
-    ctx.user_data['buy_state'] = 'WAITING_QTY'
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
     user = update.effective_user
@@ -60,9 +64,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     u = db.get_user(user.id)
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
-    # Cek apakah saldo user cukup
     if saldo >= total:
-        # --- JIKA SALDO CUKUP: LANGSUNG BELI ---
         if not db.deduct_saldo(user.id, total):
             await update.message.reply_text("❌ Gagal memotong saldo.")
             return
@@ -79,7 +81,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 numbers_bought.append((res['order_id'], res['token'], res['phone']))
             else:
                 await msg.edit_text("❌ Gagal menyewa nomor dari provider. Saldo Anda telah dikembalikan.")
-                db.add_saldo(user.id, total) # Refund total
+                db.add_saldo(user.id, total)
                 ctx.user_data.clear()
                 return
                 
@@ -90,7 +92,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         await msg.edit_text(txt, parse_mode=ParseMode.HTML)
         
     else:
-        # --- JIKA SALDO KURANG: MINTA QRIS ---
         await update.message.reply_text(
             f"💰 Saldo Anda: Rp {saldo:,}\n"
             f"💸 Total Harga: Rp {total:,}\n\n"
@@ -104,7 +105,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, total, ctx, is_direct_buy=True))
 
-    ctx.user_data['buy_state'] = None # Reset state
+    ctx.user_data['buy_state'] = None
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -134,7 +135,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
         
     qris_bytes = result["image"]
     caption_dehuy = result["caption"]
-    qris_msg_id = result["msg_id"] # Ambil ID pesan dari dehuyz
+    qris_msg_id = result["msg_id"] 
     
     keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
     
@@ -147,7 +148,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
     )
     
     async def bg_wait_and_process():
-        # Kirim qris_msg_id ke fungsi wait_for_payment
         is_paid_status = await dehuyz_automation.wait_for_payment(amount, qris_msg_id)
         
         if is_paid_status == "success":

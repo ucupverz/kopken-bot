@@ -281,9 +281,18 @@ async def handle_message(update, ctx):
         await cmd_deposit(update, ctx)
         return
         
-    if text in ["🛒 Kopken", "🛒 Kopken Filter", "🛒 Shopee", "🛒 Shopee Filter"]:
-        service_name = text.replace("🛒 ", "")
-        await handle_direct_buy(update, ctx, service_name)
+    if text.startswith("🛒 "):
+        # Ambil nama layanan dengan membuang emoji dan angka stok di ujung
+        # Contoh string: "🛒 Kopken (484)" -> jadi "Kopken"
+        service_name = re.sub(r"\s*\(\d+\)$", "", text.replace("🛒 ", ""))
+        
+        await update.message.reply_text(
+            f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+        ctx.user_data['buy_service'] = service_name
+        ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
     # --- END HANDLER MENU OTP ---
 
