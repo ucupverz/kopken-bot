@@ -771,8 +771,16 @@ def main():
         asyncio.create_task(tracker_worker(app.bot))
         print("[SFOOD] Tracker worker started")
         
-        # GANTI URL DI BAWAH INI PAKAI URL RAILWAY LU
-        url_webhook = "https://okezones-bot.up.railway.app/telegram-webhook" 
+        # === AUTO-DETECT URL RAILWAY ===
+        # Ambil URL dari env var Railway, kalau ga ada fallback ke localhost
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "localhost")
+        
+        # Kalau localhost, pake http. Kalau domain Railway, pake https.
+        if domain == "localhost":
+            url_webhook = f"http://{domain}/telegram-webhook"
+        else:
+            url_webhook = f"https://{domain}/telegram-webhook"
+            
         await app.bot.set_webhook(url=url_webhook)
         print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
 
