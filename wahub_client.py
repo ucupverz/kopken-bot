@@ -88,3 +88,11 @@ async def retry_otp(token):
             return r.json(), r.status_code
         except Exception as e:
             return {"error": str(e)}, 500
+
+        async def get_order_status(order_id):
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.get(f"{WAHUB_BASE_URL}/api/order/{order_id}", headers=get_headers())
+            return r.json(), r.status_code
+        except Exception as e:
+            return {"error": str(e)}, 500
