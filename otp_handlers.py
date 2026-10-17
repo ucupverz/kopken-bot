@@ -326,7 +326,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             db.update_otp_order_status(last_order['order_id'], 'cancelled')
             ctx.user_data['last_order'] = None
             
-            await query.edit_message_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} dikembalikan.")
+            await query.edit_message_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} dikembalikan.", reply_markup=None)
             kb = await get_otp_keyboard()
             await query.message.reply_text("Menu OTP:", reply_markup=kb)
         else:
@@ -537,8 +537,9 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
     user = update.effective_user
     last_order = ctx.user_data.get('last_order')
     
+    # 1. Cancel order lama kalau ada
     if last_order:
-        await query.message.reply_text("⏳ Membatalkan pesanan sebelumnya...")
+        await query.edit_message_text("⏳ Membatalkan pesanan sebelumnya...") # <-- Ubah edit text sini
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         if code == 200:
             refund = last_order.get('price', 0)
@@ -549,6 +550,7 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
         else:
             await query.message.reply_text("⚠️ Gagal membatalkan pesanan lama, tapi lanjut proses beli Kopken Filter.")
 
+    # 2. Lanjut ke proses beli Kopken Filter
     data_parts = query.data.split("_")
     service_id = int(data_parts[2])
     harga_jual = int(data_parts[3])
@@ -559,7 +561,8 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
     ctx.user_data['buy_total'] = harga_jual
     ctx.user_data['buy_id'] = service_id
     
-    await query.edit_message_text(
+    # Bot nanya qty beli ke user
+    await query.message.reply_text(
         f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
         parse_mode=ParseMode.HTML
     )
