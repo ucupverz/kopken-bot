@@ -288,18 +288,26 @@ async def handle_message(update, ctx):
         if not last_order:
             await update.message.reply_text("❌ Tidak ada pesanan aktif untuk dibatalkan.")
             return
+            
+        # 1. Matiin polling biar ga dobel refund
+        ctx.bot_data[f"poll_{last_order['order_id']}"] = False
+        
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         if code == 200:
-            refund = res.get('refunded', 0)
-            db.add_saldo(user.id, refund)
-            await update.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} telah dikembalikan.")
+            # 2. Ambil harga jual dari memori (bukan dari API)
+            refund_amount = last_order.get('price', 0)
+            
+            db.add_saldo(user.id, refund_amount)
+            await update.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund_amount:,} telah dikembalikan.")
             ctx.user_data['last_order'] = None
+            
+            # Kembalikan keyboard ke menu OTP
             kb = await get_otp_keyboard()
             await update.message.reply_text("Menu OTP:", reply_markup=kb)
         else:
             await update.message.reply_text("❌ Gagal membatalkan pesanan. Mungkin waktu sewa habis.")
         return
-
+    
     if text == "🔄 Kirim Ulang OTP":
         last_order = ctx.user_data.get('last_order')
         if not last_order:
