@@ -190,10 +190,11 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         order_kb = get_order_keyboard()
         
         msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=order_kb)
-        
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         
+        # Timer dijalanin di background
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, service_name, ph, 1200))
+        # Polling OTP
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
         if "kopken" in service_name.lower() and "filter" not in service_name.lower():
@@ -216,34 +217,53 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
+
+# =====================================================================
+# FUNGSI TIMER (TRICK HAPUS & KIRIM ULANG)
+# =====================================================================
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
+    current_msg_id = msg_id
+    
     while True:
-        await asyncio.sleep(5)
+        # Update tiap 10 detik biar ga kena rate limit Telegram
+        await asyncio.sleep(10) 
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
         if time_left <= 0:
+            # Waktu habis, hapus pesan terakhir
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            except Exception:
+                pass
             break
             
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
+            # Status berubah (OTP masuk / batal), hentikan timer
             break
             
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
+        
         try:
-            # PERBAIKAN: Harus kirim ulang reply_markup biar Telegram mau nge-edit
-            await bot.edit_message_text(
+            # Hapus pesan lama, kirim pesan baru dengan keyboard
+            await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            new_msg = await bot.send_message(
                 chat_id=chat_id, 
-                message_id=msg_id, 
                 text=ui_text, 
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_order_keyboard()
             )
-        except Exception as e:
-            # Abaikan error rate limit Telegram, timer tetep jalan
+            current_msg_id = new_msg.message_id
+        except Exception:
+            # Kalau error (misal rate limit), lanjut aja timer-nya
             pass
 
+
+# =====================================================================
+# FUNGSI POLLING OTP (MAX 20 MENIT)
+# =====================================================================
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
     if not db_order or db_order['status'] != 'waiting':
@@ -251,7 +271,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
 
     start_time = time.time()
     while time.time() - start_time < 1200: # Loop maksimal 20 menit (1200 detik)
-        # Cek apakah user udah batal
         db_order = db.get_otp_order(order_id)
         if not db_order or db_order['status'] != 'waiting':
             return 
@@ -262,23 +281,18 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             db.update_otp_order_status(order_id, 'success', otp)
             await wahub_client.mark_done(order_id)
             
+            # Hapus UI lama, kirim UI Baru yang udah sukses
             ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
             try:
-                await bot.edit_message_text(
-                    chat_id=user_id, 
-                    message_id=msg_id, 
-                    text=ui_text, 
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_keyboard()
-                )
+                await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_keyboard())
             except Exception:
                 pass
             return
             
-        # Tunggu 15 detik sebelum ngecek lagi
         await asyncio.sleep(15)
         
-    # Kalau 20 menit beneran abis, baru cancel
+    # Kalau 20 menit beneran abis (timeout)
     db_order = db.get_otp_order(order_id)
     if db_order and db_order['status'] == 'waiting':
         cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
@@ -288,15 +302,11 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
             ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Saldo Rp {db_order['price']:,} dikembalikan."
             try:
-                await bot.edit_message_text(
-                    chat_id=user_id, 
-                    message_id=msg_id, 
-                    text=ui_text, 
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_keyboard()
-                )
+                await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_keyboard())
             except Exception:
                 pass
+
 
 async def handle_cancel_order(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
