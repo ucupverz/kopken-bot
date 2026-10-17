@@ -10,7 +10,7 @@ TG_SESSION_STR = os.getenv("TG_SESSION_STR", "")
 DEHUYZ_BOT = "@dehuyzwaotpbot"
 
 async def request_qris(amount: int):
-    """Minta QRIS dan ambil teks caption aslinya."""
+    """Minta QRIS dan ambil teks caption aslinya, plus ID pesannya."""
     if not API_ID or not API_HASH:
         return "error", "TG_API_ID / TG_API_HASH belum di-set!"
 
@@ -57,25 +57,23 @@ async def request_qris(amount: int):
             return "error", "QRIS tidak muncul."
             
         qris_bytes = await client.download_media(qris_msg, bytes)
-        caption_text = qris_msg.text or "" # Ambil teks aslinya
+        caption_text = qris_msg.text or "" 
         
-        return "success", {"image": qris_bytes, "caption": caption_text}
+        # KITA SIMPAN ID PESAN QRIS-NYA
+        return "success", {"image": qris_bytes, "caption": caption_text, "msg_id": qris_msg.id}
         
     except Exception as e:
         return "error", str(e)
     finally:
         await client.disconnect()
 
-async def wait_for_payment(amount: int):
-    """Polling cek status pembayaran."""
+async def wait_for_payment(amount: int, qris_msg_id: int):
+    """Polling cek status pembayaran khusus untuk QRIS ini."""
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
     await client.connect()
     try:
         max_wait = 300 
         start_time = asyncio.get_event_loop().time()
-        
-        msgs = await client.get_messages(DEHUYZ_BOT, limit=1)
-        last_id = msgs[0].id if msgs else 0
         
         while True:
             elapsed = asyncio.get_event_loop().time() - start_time
@@ -85,13 +83,19 @@ async def wait_for_payment(amount: int):
                 return "timeout"
                 
             await asyncio.sleep(5)
-            new_msgs = await client.get_messages(DEHUYZ_BOT, limit=2)
+            
+            # Cek pesan baru SETELAH pesan QRIS ini dibuat
+            new_msgs = await client.get_messages(DEHUYZ_BOT, min_id=qris_msg_id, limit=5)
+            
+            # Urutkan dari yang paling lama ke baru
+            new_msgs = sorted(new_msgs, key=lambda x: x.id)
             
             for msg in new_msgs:
-                if msg.id > last_id:
-                    text = (msg.text or "").lower()
-                    if "berhasil" in text and "saldo" in text:
+                text = (msg.text or "").lower()
+                if "berhasil" in text and "saldo" in text:
+                    # Cek nominalnya juga buat mastiin
+                    if str(amount) in text:
                         return "success"
-                    last_id = msg.id
+                qris_msg_id = msg.id # Update ID biar ga ngecek pesan yang sama 2x
     finally:
         await client.disconnect()

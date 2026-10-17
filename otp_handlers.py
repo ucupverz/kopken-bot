@@ -134,6 +134,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
         
     qris_bytes = result["image"]
     caption_dehuy = result["caption"]
+    qris_msg_id = result["msg_id"] # Ambil ID pesan dari dehuyz
     
     keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
     
@@ -146,7 +147,8 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
     )
     
     async def bg_wait_and_process():
-        is_paid_status = await dehuyz_automation.wait_for_payment(amount)
+        # Kirim qris_msg_id ke fungsi wait_for_payment
+        is_paid_status = await dehuyz_automation.wait_for_payment(amount, qris_msg_id)
         
         if is_paid_status == "success":
             try:
