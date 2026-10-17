@@ -772,10 +772,7 @@ def main():
         print("[SFOOD] Tracker worker started")
         
         # === AUTO-DETECT URL RAILWAY ===
-        # Ambil URL dari env var Railway, kalau ga ada fallback ke localhost
         domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "localhost")
-        
-        # Kalau localhost, pake http. Kalau domain Railway, pake https.
         if domain == "localhost":
             url_webhook = f"http://{domain}/telegram-webhook"
         else:
@@ -783,6 +780,10 @@ def main():
             
         await app.bot.set_webhook(url=url_webhook)
         print(f"[TELEGRAM] Webhook diset ke: {url_webhook}")
+
+    # INI BARIS YANG TADI KEHAPUS
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    bot_application = app
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
