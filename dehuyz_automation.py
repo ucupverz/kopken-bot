@@ -10,7 +10,7 @@ TG_SESSION_STR = os.getenv("TG_SESSION_STR", "")
 DEHUYZ_BOT = "@dehuyzwaotpbot"
 
 async def request_qris(amount: int):
-    """Hanya minta QRIS ke bot dehuyz dan return gambar (bytes)."""
+    """Minta QRIS dan ambil teks caption aslinya."""
     if not API_ID or not API_HASH:
         return "error", "TG_API_ID / TG_API_HASH belum di-set!"
 
@@ -44,7 +44,6 @@ async def request_qris(amount: int):
         await asyncio.sleep(2)
         await client.send_message(DEHUYZ_BOT, str(amount))
         
-        # Loop tunggu gambar (Max 60s)
         qris_msg = None
         for _ in range(15):
             await asyncio.sleep(4)
@@ -58,7 +57,9 @@ async def request_qris(amount: int):
             return "error", "QRIS tidak muncul."
             
         qris_bytes = await client.download_media(qris_msg, bytes)
-        return "success", qris_bytes
+        caption_text = qris_msg.text or "" # Ambil teks aslinya
+        
+        return "success", {"image": qris_bytes, "caption": caption_text}
         
     except Exception as e:
         return "error", str(e)
@@ -66,18 +67,23 @@ async def request_qris(amount: int):
         await client.disconnect()
 
 async def wait_for_payment(amount: int):
-    """Polling cek status pembayaran setelah QRIS dikirim."""
+    """Polling cek status pembayaran."""
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
     await client.connect()
     try:
-        max_wait = 300 # 5 menit
+        max_wait = 300 
         start_time = asyncio.get_event_loop().time()
         
-        # Ambil pesan terakhir buat starting point
         msgs = await client.get_messages(DEHUYZ_BOT, limit=1)
         last_id = msgs[0].id if msgs else 0
         
-        while asyncio.get_event_loop().time() - start_time < max_wait:
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            remaining = int(max_wait - elapsed)
+            
+            if remaining <= 0:
+                return "timeout"
+                
             await asyncio.sleep(5)
             new_msgs = await client.get_messages(DEHUYZ_BOT, limit=2)
             
@@ -85,8 +91,7 @@ async def wait_for_payment(amount: int):
                 if msg.id > last_id:
                     text = (msg.text or "").lower()
                     if "berhasil" in text and "saldo" in text:
-                        return True
+                        return "success"
                     last_id = msg.id
-        return False
     finally:
         await client.disconnect()
