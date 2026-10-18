@@ -229,17 +229,12 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     numbers_bought = []
     for i in range(qty):
-        # 1. Tembak API Wahub dulu (JANGAN POTONG SALDO DULU)
+        # 1. Tembak API Wahub (JANGAN PAKE ASYNCIO.WAIT_FOR)
         try:
-            res, code = await asyncio.wait_for(wahub_client.rent_number(target_service['id']), timeout=15)
-        except asyncio.TimeoutError:
-            await update.message.reply_text(f"❌ Server Provider (Wahub) Timeout (15s). Balance tidak dipotong, silakan coba lagi nanti.")
-            ctx.user_data['is_processing'] = False
-            return
+            res, code = await wahub_client.rent_number(target_service['id'])
         except Exception as e:
             await update.message.reply_text(f"❌ Error Provider: {e}")
-            ctx.user_data['is_processing'] = False
-            return
+            break
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
@@ -282,6 +277,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, o, display_name, p, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, o, t, display_name, msg_ui.message_id, p))
+        await asyncio.sleep(1) # Kasih jeda 1 detik biar ga rate limit
 
     # Promo Kopken cuma buat nomor pertama
     if "kopken" in api_name.lower() and "filter" not in api_name.lower():
@@ -547,12 +543,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 service_id = ctx.user_data.get('buy_id')
                 qty = ctx.user_data.get('buy_qty', 1)
                 
-                # --- FIX: JANGAN POTONG SALDO DULU ---
-                try:
-                    res, code = await asyncio.wait_for(wahub_client.rent_number(service_id), timeout=15)
-                except asyncio.TimeoutError:
-                    await bot.send_message(chat_id, f"❌ Server Provider Timeout. Balance Rp {amount:,} tidak dipotong, silakan coba lagi.")
-                    return
+                res, code = await wahub_client.rent_number(service_id)
                 
                 if code == 200 and res.get('order_id'):
                     oid = res['order_id']
@@ -560,7 +551,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     ph = res['phone']
                     harga_satuan = amount // qty
                     
-                    # Potong saldo setelah order ID didapat
                     db.deduct_saldo(chat_id, amount, f"Beli {display_name}")
                     db.create_otp_order(chat_id, oid, tkn, ph, display_name, harga_satuan)
                     ctx.bot_data[f"poll_{oid}"] = True
@@ -574,7 +564,8 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
                 else:
                     err_msg = res.get('message') or res.get('error') or "Unknown error"
-                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance tidak dipotong.")
+                    db.add_saldo(chat_id, amount, "Refund Gagal Order")
+                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance Rp {amount:,} dikembalikan.", parse_mode=ParseMode.HTML)
                 
             else:
                 db.add_saldo(chat_id, amount, f"Topup QRIS Rp {amount:,}")
