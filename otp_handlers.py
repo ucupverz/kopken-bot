@@ -236,6 +236,10 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             await update.message.reply_text(f"❌ Server Provider (Wahub) Timeout (15s). Balance tidak dipotong, silakan coba lagi nanti.")
             ctx.user_data['is_processing'] = False
             return
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error Provider: {e}")
+            ctx.user_data['is_processing'] = False
+            return
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
