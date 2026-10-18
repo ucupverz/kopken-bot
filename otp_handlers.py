@@ -28,15 +28,18 @@ def get_menu_keyboard():
 async def get_otp_keyboard():
     services = await wahub_client.get_services()
     map_names = {
-        "Kopken": "Kopken Gacha",
-        "Kopken Filter": "Kopken Asoy",
-        "Shopee": "Shope Gacha",
-        "Shopee Filter": "Shope Asoy"
+        "kopken": "Kopken Gacha",
+        "kopken filter": "Kopken Asoy",
+        "shopee": "Shope Gacha",
+        "shopee filter": "Shope Asoy"
     }
+    
+    # Pakai lower() biar ga case-sensitive
     stock_map = {}
     for s in services:
-        if s['name'] in map_names:
-            stock_map[map_names[s['name']]] = s
+        clean_name = s['name'].strip().lower()
+        if clean_name in map_names:
+            stock_map[map_names[clean_name]] = s
             
     def format_btn(name):
         if name in stock_map:
@@ -53,16 +56,18 @@ async def get_otp_keyboard():
 
 def build_all_services_inline(services):
     map_names = {
-        "Kopken": "Kopken Gacha",
-        "Kopken Filter": "Kopken Asoy",
-        "Shopee": "Shope Gacha",
-        "Shopee Filter": "Shope Asoy"
+        "kopken": "Kopken Gacha",
+        "kopken filter": "Kopken Asoy",
+        "shopee": "Shope Gacha",
+        "shopee filter": "Shope Asoy"
     }
+    
     keyboard = []
     row = []
     for s in services:
-        if s['name'] in map_names:
-            display_name = map_names[s['name']]
+        clean_name = s['name'].strip().lower()
+        if clean_name in map_names:
+            display_name = map_names[clean_name]
             if s['stock'] > 0:
                 harga_jual = s['price'] + MARGIN
                 btn_text = f"{display_name} | {harga_jual:,} (Stok: {s['stock']})"
@@ -178,15 +183,15 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         return
         
     map_back = {
-        "Kopken Gacha": "Kopken",
-        "Kopken Asoy": "Kopken Filter",
-        "Shope Gacha": "Shopee",
-        "Shope Asoy": "Shopee Filter"
+        "kopken gacha": "kopken",
+        "kopken asoy": "kopken filter",
+        "shope gacha": "shopee",
+        "shope asoy": "shopee filter"
     }
-    api_name = map_back.get(display_name, display_name)
+    api_name = map_back.get(display_name.lower(), display_name.lower())
         
     services = await wahub_client.get_services()
-    target_service = next((s for s in services if s['name'].lower() == api_name.lower()), None)
+    target_service = next((s for s in services if s['name'].strip().lower() == api_name), None)
     
     if not target_service:
         await update.message.reply_text("❌ Layanan tidak ditemukan.")
@@ -377,7 +382,6 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
     last_order = ctx.user_data.get('last_order')
     
     if action == "selesai":
-        # Hapus pesan
         try:
             await query.delete_message()
         except Exception:
@@ -389,7 +393,6 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
         
     if action == "batal":
-        # Hapus pesan UI lama
         try:
             await query.delete_message()
         except Exception:
@@ -434,15 +437,15 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     harga = last_order['price']
     
     map_back = {
-        "Kopken Gacha": "Kopken",
-        "Kopken Asoy": "Kopken Filter",
-        "Shope Gacha": "Shopee",
-        "Shope Asoy": "Shopee Filter"
+        "kopken gacha": "kopken",
+        "kopken asoy": "kopken filter",
+        "shope gacha": "shopee",
+        "shope asoy": "shopee filter"
     }
-    api_name = map_back.get(display_name, display_name)
+    api_name = map_back.get(display_name.lower(), display_name.lower())
     
     services = await wahub_client.get_services()
-    target_service = next((s for s in services if s['name'].lower() == api_name.lower()), None)
+    target_service = next((s for s in services if s['name'].strip().lower() == api_name), None)
     
     if not target_service or target_service['stock'] < 1:
         await query.message.reply_text(f"❌ Maaf, stok {display_name} lagi kosong. Coba lagi nanti.")

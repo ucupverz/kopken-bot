@@ -81,20 +81,19 @@ def sanitize_voc_input(text):
     if len(t) < 3 or len(t) > 50: return None
     return t
 
+# === KEYBOARD BARU TANPA TARIF & GABUNG PANTAU KURIR ===
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
         ["📱 WhatsApp OTP", "🔑 Redeem Invitation Code"],
-        ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
-        ["📡 Pantau Kurir", "❓ Bantuan"]
+        ["🍔 ShopeeFood", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
         ["📱 WhatsApp OTP", "🔑 Redeem Invitation Code"],
-        ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
-        ["📡 Pantau Kurir", "🔧 Admin Panel"],
+        ["🍔 ShopeeFood", "🔧 Admin Panel"],
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
@@ -121,14 +120,9 @@ async def cmd_help(update, ctx):
         "• Klik tombol WhatsApp OTP di keyboard\n\n"
         "*🍔 ShopeeFood Tracker:*\n"
         "• Kirim link tracker + label\n"
-        "• `/sfood` — Menu tracker\n\n"
-        "*📡 Pantau Kurir:*\n"
-        "• `/telemetry` — Menu Pantau Kurir\n"
-        "• `/sfood_metrics <order_id>` — Statistik order\n\n"
-        "*📊 Tarif:*\n"
-        "• `/tarif <angka>` — Input biaya layanan\n\n"
+        "• `/sfood` — Menu tracker (Termasuk Pantau Kurir & Tarif)\n\n"
         "*Commands:*\n"
-        "/start, /help, /balance, /sfood, /telemetry, /tarif"
+        "/start, /help, /balance, /sfood"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -234,14 +228,6 @@ async def handle_message(update, ctx):
 
     if text == "🍔 ShopeeFood":
         await cmd_sfood(update, ctx)
-        return
-
-    if text == "📊 Tarif ShopeeFood":
-        await update.message.reply_text("📊 <b>Tarif ShopeeFood</b>\n\n<code>/tarif &lt;angka&gt;</code> — Input biaya\n<code>/tarif_cek</code> — Cek status\n<code>/tarif_stats</code> — Statistik", parse_mode=ParseMode.HTML)
-        return
-
-    if text == "📡 Pantau Kurir":
-        await cmd_telemetry(update, ctx)
         return
 
     if text == "❓ Bantuan":
