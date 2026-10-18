@@ -143,6 +143,7 @@ def get_order_inline_keyboard(status="Menunggu OTP"):
             ]
         ])
     else:
+        # Ini tombol pas OTP udah masuk, Batal & Refund hilang
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data="otp_act_resend"),
@@ -280,13 +281,14 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
-# === KUNCI PERUBAHAN: TIMER HAPUS & KIRIM ULANG TIAP DETIK ===
+
+# === LOGIC HAPUS & KIRIM ULANG (TIMER REALTIME) ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     current_msg_id = msg_id
     
     while True:
-        await asyncio.sleep(1) # Jalan tiap 1 detik biar realtime kaya foto
+        await asyncio.sleep(5) # Cek tiap 5 detik biar ga rate limit
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
@@ -297,12 +299,9 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
             
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
+            # Hapus pesan timer kalau OTP udah masuk (ditangani sama poll_otp_bg)
             break
             
-        # Cuma update UI tiap 5 detik biar ga rate limit Telegram
-        if elapsed % 5 != 0 and elapsed != 1:
-            continue
-
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
         try:
@@ -335,12 +334,16 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             db.update_otp_order_status(order_id, 'success', otp)
             await wahub_client.mark_done(order_id)
             
+            # TIMER SELESAI, GANTI JADI UI OTP MASUK
             ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
             try:
+                # Hapus pesan timer
                 await bot.delete_message(chat_id=user_id, message_id=msg_id)
-                await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             except Exception:
                 pass
+            
+            # Kirim pesan baru pake UI "Selesai" (Tombol berubah)
+            await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             return
             
         await asyncio.sleep(15)
