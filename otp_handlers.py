@@ -255,7 +255,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
     msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
     
-    # Simpan msg_id di sini
     ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
     ctx.user_data['ui_msg_id'] = msg_ui.message_id
     
@@ -281,40 +280,42 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
-
-# === KUNCI PERUBAHAN: TIMER HAPUS & KIRIM ULANG ===
+# === KUNCI PERUBAHAN: TIMER HAPUS & KIRIM ULANG TIAP DETIK ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
+    current_msg_id = msg_id
     
     while True:
-        await asyncio.sleep(5) 
+        await asyncio.sleep(1) # Jalan tiap 1 detik biar realtime kaya foto
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
         if time_left <= 0:
+            try: await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            except: pass
             break
             
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
             break
             
+        # Cuma update UI tiap 5 detik biar ga rate limit Telegram
+        if elapsed % 5 != 0 and elapsed != 1:
+            continue
+
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
         try:
-            # DEBUG: Paksa hapus pesan lama
-            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            
-            # DEBUG: Kirim pesan baru, simpan ID baru ke variable
+            # HAPUS PESAN LAMA, KIRIM PESAN BARU
+            await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
             new_msg = await bot.send_message(
                 chat_id=chat_id, 
                 text=ui_text, 
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_order_inline_keyboard("Menunggu OTP")
             )
-            msg_id = new_msg.message_id # Update ID pesan lama ke ID baru
-            
+            current_msg_id = new_msg.message_id
         except Exception as e:
-            # INI YANG PENTING: Biar error-nya kelihatan di Railway
             print(f"[TIMER ERROR] {e}")
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
@@ -371,7 +372,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             except Exception:
                 pass
 
-
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -420,7 +420,6 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             await query.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
         else:
             await query.message.reply_text("❌ Gagal minta ulang OTP. Mungkin batas retry habis atau waktu sewa habis.")
-
 
 async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -486,7 +485,6 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     else:
         err_msg = res.get('message') or res.get('error') or "Unknown error"
         await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML)
-
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = "💰 <b>Deposit Balance</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
@@ -585,7 +583,6 @@ async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML)
     ctx.user_data['buy_state'] = 'WAITING_QTY'
 
-
 async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -632,7 +629,6 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         reply = f"❓ Status tidak dikenal: `{status}`"
         
     await query.edit_message_text(reply, parse_mode=ParseMode.MARKDOWN)
-
 
 async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
