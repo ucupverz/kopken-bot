@@ -132,12 +132,6 @@ def get_otp_order(order_id):
         cursor = conn.execute("SELECT * FROM otp_orders WHERE order_id = ?", (order_id,))
         return cursor.fetchone()
 
-# === FUNGSI SFOOD YANG SEMPET HILANG ===
-def sfood_get_active_orders():
-    with get_conn() as conn:
-        cursor = conn.execute("SELECT * FROM sfood_orders WHERE status = 'active'")
-        return cursor.fetchall()
-
 def create_voc(code, quota, created_by):
     with get_conn() as conn:
         try:
@@ -174,3 +168,38 @@ def get_user_transactions(user_id, limit=10):
     with get_conn() as conn:
         cursor = conn.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
         return cursor.fetchall()
+
+# === FUNGSI YANG HILANG, DITAMBAHIN ===
+def get_stats():
+    with get_conn() as conn:
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_cek = conn.execute("SELECT COUNT(*) FROM transactions WHERE description LIKE 'Cek Kopken%'").fetchone()[0]
+        return {"total_users": total_users, "total_cek": total_cek}
+
+def list_voc_codes(limit=20):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM voc_codes ORDER BY created_at DESC LIMIT ?", (limit,))
+        return cursor.fetchall()
+
+def revoke_voc(code):
+    with get_conn() as conn:
+        conn.execute("UPDATE voc_codes SET active = 0 WHERE code = ?", (code,))
+
+def list_all_users(limit=50):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ?", (limit,))
+        return cursor.fetchall()
+
+def get_user_detail(user_id):
+    with get_conn() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        vocs = conn.execute("SELECT * FROM voc_codes WHERE used_by = ?", (user_id,)).fetchall()
+        return user, vocs
+
+def get_voc_detail(code):
+    with get_conn() as conn:
+        voc = conn.execute("SELECT * FROM voc_codes WHERE code = ?", (code,)).fetchone()
+        user = None
+        if voc and voc['used_by']:
+            user = conn.execute("SELECT * FROM users WHERE user_id = ?", (voc['used_by'],)).fetchone()
+        return voc, user

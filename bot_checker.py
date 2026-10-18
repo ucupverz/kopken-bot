@@ -104,11 +104,12 @@ async def bg_check_stuck_orders(app):
     while True:
         await asyncio.sleep(60)
         try:
-            # Cari orderan waiting yang umurnya > 20 menit
+            # Cari orderan waiting yang umurnya > 20 menit DAN OTP masih kosong
             with db.get_conn() as conn:
                 cursor = conn.execute("""
                     SELECT * FROM otp_orders 
                     WHERE status = 'waiting' 
+                    AND otp IS NULL
                     AND created_at <= datetime('now', '-20 minutes')
                 """)
                 stuck_orders = cursor.fetchall()
