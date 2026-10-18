@@ -56,16 +56,24 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                label TEXT,
+                link TEXT,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         print("✅ Database initialized.")
 
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
-            # PAKSA CAST KE INTEGER (biar kalau format string ga nge-bug)
             cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as s FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             
-            # Debugging print ke terminal Railway
             print(f"[DB] Deduct user {user_id}, saldo saat ini: {row['s'] if row else 'NOT FOUND'}, butuh: {amount}")
             
             if not row or row['s'] < amount:
@@ -197,3 +205,9 @@ def get_voc_detail(code):
         if voc and voc['used_by']:
             user = conn.execute("SELECT * FROM users WHERE user_id = ?", (voc['used_by'],)).fetchone()
         return voc, user
+
+# === FUNGSI SFOOD YANG SEMPET HILANG ===
+def sfood_get_active_orders():
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM sfood_orders WHERE status = 'active'")
+        return cursor.fetchall()
