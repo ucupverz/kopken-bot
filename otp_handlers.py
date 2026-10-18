@@ -232,7 +232,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     for i in range(qty):
         # 1. POTONG SALDO DULU (ANTI RUGI)
         if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
-            await update.message.reply_text(f"❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk (Database Locked).")
+            await update.message.reply_text(f"❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk.")
             break 
             
         # 2. TEMBAK API DEHUYZ
@@ -304,6 +304,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     while True:
+        # 1. Update UI tiap 5 detik
         await asyncio.sleep(5) 
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
@@ -483,7 +484,7 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     
     # 1. POTONG SALDO DULU
     if not db.deduct_saldo(user.id, harga, f"Beli {display_name}"):
-        await query.message.reply_text(f"❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk (Database Locked).")
+        await query.message.reply_text(f"❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk.")
         return
 
     # 2. TEMBAK API

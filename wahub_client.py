@@ -31,12 +31,13 @@ async def get_balance():
     return None
 
 async def rent_number(service_id):
-    async with httpx.AsyncClient(timeout=20) as client:
+    # Timeout dinaikin ke 35 detik biar Dehuyz ga timeout pas antri
+    async with httpx.AsyncClient(timeout=35.0) as client:
         try:
             r = await client.post(f"{WAHUB_BASE_URL}/api/rent", headers=get_headers(), json={"service_id": service_id})
             return r.json(), r.status_code
         except httpx.TimeoutException:
-            return {"error": "Server provider timeout (20s). Silakan coba lagi."}, 408
+            return {"error": "Server provider timeout (35s). Silakan coba lagi."}, 408
         except Exception as e:
             return {"error": str(e)}, 500
 
