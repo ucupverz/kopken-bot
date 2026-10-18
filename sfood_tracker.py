@@ -298,7 +298,10 @@ async def check_one_order(bot, order):
         except Exception as e:
             print(f"[SFOOD] ❌ Gagal kirim notif done: {e}")
         db.metrics_add(order_id, "done", 0, "Pesanan selesai")
-        db.sfood_stop_order(order_id)
+        
+        # === TAMBAHAN FIX: Set status jadi 600 (DONE) biar ga diambil lagi sama tracker ===
+        db.sfood_update_status(order_id, 600, "Pesanan Selesai")
+        
         print(f"[SFOOD] ✅ Order {order_id} SELESAI")
         return
 
@@ -310,7 +313,10 @@ async def check_one_order(bot, order):
         except Exception as e:
             print(f"[SFOOD] ❌ Gagal kirim notif cancel: {e}")
         db.metrics_add(order_id, "cancelled", 0, "Pesanan dibatalkan")
-        db.sfood_stop_order(order_id)
+        
+        # === TAMBAHAN FIX: Set status jadi 999 (CANCEL) ===
+        db.sfood_update_status(order_id, 999, "Pesanan Dibatalkan")
+        
         print(f"[SFOOD] ❌ Order {order_id} DIBATALKAN")
         return
 
