@@ -16,7 +16,6 @@ MARGIN = 700
 BIAYA_CEK_FRESH = 200
 BIAYA_API_BOOSTLY = 100
 
-# === KONFIGURASI API BOOSTLY ===
 BOOSTLY_BASE = "https://api.boostly.id"
 BOOSTLY_API_KEY = os.getenv("BOOSTLY_API_KEY", "kpk_live_b3fa7a15fd240b44cb12938be0c7774f")
 
@@ -256,7 +255,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan)
             numbers_bought.append((order_id, token, phone))
         else:
-            # TAMPILIN ERROR ASLI DARI WAHUB
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
             db.add_saldo(user.id, harga_satuan)
             await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
@@ -272,6 +270,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
     msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
     ctx.user_data['ui_msg_id'] = msg_ui.message_id
+    ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
     
     asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, display_name, ph, 1200))
     asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph))
@@ -483,6 +482,7 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         
         msg_ui = await query.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
+        ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
         
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, new_oid, display_name, new_ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph))
