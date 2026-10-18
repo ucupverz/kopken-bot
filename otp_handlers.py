@@ -377,6 +377,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
     last_order = ctx.user_data.get('last_order')
     
     if action == "selesai":
+        # Hapus pesan
         try:
             await query.delete_message()
         except Exception:
@@ -388,7 +389,12 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
         
     if action == "batal":
-        await query.edit_message_text("⏳ Membatalkan pesanan...", reply_markup=None)
+        # Hapus pesan UI lama
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+            
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         
         if code == 200:
