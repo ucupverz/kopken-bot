@@ -176,28 +176,23 @@ async def handle_message(update, ctx):
         phone = normalize_phone(text)
         msg = await update.message.reply_text("🔍 Mengecek nomor Kopken...")
         
-        # --- LOGIKA FREE TRIAL ---
         trial_tersisa = db.get_trial_kopken(user.id)
         result = await boostly_cek_single(phone)
         
         if not result.get("success"):
-            services = await wahub_client.get_services()
-            target_filter = next((s for s in services if s['name'].lower() == "kopken filter"), None)
+            # --- INI BAGIAN DEBUG ---
+            raw_data = result.get("raw", "Ga ada data")
+            detail_error = result.get("detail", "Ga ada detail")
             
-            if target_filter and target_filter['stock'] > 0:
-                harga_filter = target_filter['price'] + 700
-                btn_text = f"🛒 Beli Kopken Filter ({target_filter['stock']}) - {harga_filter:,}"
-                filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
-            else:
-                filter_kb = None
-
             promo_txt = (
-                f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
-                f"Lu ga perlu pusing, lu bisa langsung pakai nomor <code>{phone}</code> ini.\n"
-                f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!"
+                f"⚠️ <b>Debugging API Boostly</b>\n\n"
+                f"<b>Detail:</b> {detail_error}\n"
+                f"<b>Raw Response:</b>\n<code>{raw_data}</code>\n\n"
+                f"Tolong kirim screenshot ini ke developer."
             )
-            await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML, reply_markup=filter_kb)
+            await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML)
             return
+            # --- END DEBUG ---
             
         status = result.get("status")
         

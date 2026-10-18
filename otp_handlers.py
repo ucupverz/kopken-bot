@@ -13,8 +13,8 @@ import dehuyz_automation
 
 QUICK_SERVICES = ["Kopken", "Kopken Filter", "Shopee", "Shopee Filter"] 
 MARGIN = 700
-BIAYA_CEK_FRESH = 200  # Harga jual ke user
-BIAYA_API_BOOSTLY = 100 # Modal lu ke Boostly
+BIAYA_CEK_FRESH = 200
+BIAYA_API_BOOSTLY = 100
 
 # === KONFIGURASI API BOOSTLY ===
 BOOSTLY_BASE = "https://api.boostly.id"
@@ -61,7 +61,7 @@ def build_all_services_inline(services):
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-# === FUNGSI CEK KOPKEN PAKE BOOSTLY (FIXED) ===
+# === FUNGSI CEK KOPKEN PAKE BOOSTLY (VERSI DEBUG) ===
 async def boostly_cek_single(nomor):
     phone = nomor
     if phone.startswith("62"):
@@ -74,20 +74,19 @@ async def boostly_cek_single(nomor):
                 headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"}, 
                 json={"phone": phone}
             )
-            # --- LOGIKA PARSING BOOSTLY ---
+            
             resp_json = r.json()
-            status_api = resp_json.get("status") # 'fresh' atau 'registered'
+            status_api = resp_json.get("status")
             
             if status_api == "fresh":
                 return {"success": True, "status": "fresh", "name": None}
             elif status_api == "registered":
                 return {"success": True, "status": "registered", "name": resp_json.get("name")}
             else:
-                # Kalau ga ada status, balikin error
                 return {"success": False, "detail": "Format respon API tidak dikenal", "raw": resp_json}
                 
         except Exception as e:
-            return {"success": False, "detail": f"Network error: {e}"}
+            return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = time_left // 60
@@ -134,7 +133,6 @@ def get_order_inline_keyboard():
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = db.get_user(user.id)
-    # Ambil saldo (Balance)
     balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     
     kb_bawah = await get_otp_keyboard()
@@ -229,10 +227,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, service_name, msg_ui.message_id, ph))
         
         if "kopken" in service_name.lower() and "filter" not in service_name.lower():
-            # Cek riwayat pembelian Kopken. Kalau baru pertama kali, kasih trial.
-            # (Asumsi lu udah nambahin fungsi db.cek_trial_kopken di database.py, 
-            # kalau belum, kita pake logic simpel dulu: kasih tau ada trial 2x)
-            
             promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
             promo_txt += f"*(Kamu punya 2x Free Trial cek gratis untuk pembelian pertamamu!)*"
             
@@ -538,41 +532,32 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     phone = query.data.split("_")[2]
     user = update.effective_user
     
-    # --- LOGIKA FREE TRIAL ---
-    # Cek apakah user belum pernah cek kopken sebelumnya (pakai tabel transaksi lu)
-    # Kalau lu belum ada fungsi db.cek_trial, ini fallback-nya:
-    trial_tersisa = ctx.user_data.get('trial_kopken', 2)
+    trial_tersisa = db.get_trial_kopken(user.id)
     
     await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
     
     result = await boostly_cek_single(phone)
     
     if not result.get("success"):
-        services = await wahub_client.get_services()
-        target_filter = next((s for s in services if s['name'].lower() == "kopken filter"), None)
+        # --- INI BAGIAN DEBUG ---
+        raw_data = result.get("raw", "Ga ada data")
+        detail_error = result.get("detail", "Ga ada detail")
         
-        if target_filter and target_filter['stock'] > 0:
-            harga_filter = target_filter['price'] + MARGIN
-            btn_text = f"🛒 Beli Kopken Filter ({target_filter['stock']}) - {harga_filter:,}"
-            filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buyfilter_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
-        else:
-            filter_kb = None
-
         promo_txt = (
-            f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
-            f"Lu ga perlu pusing, lu bisa langsung pakai nomor <code>{phone}</code> ini.\n"
-            f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!\n\n"
-            f"<i>Klik tombol di bawah untuk otomatis membatalkan pesanan ini & membeli Kopken Filter.</i>"
+            f"⚠️ <b>Debugging API Boostly</b>\n\n"
+            f"<b>Detail:</b> {detail_error}\n"
+            f"<b>Raw Response:</b>\n<code>{raw_data}</code>\n\n"
+            f"Tolong kirim screenshot ini ke developer."
         )
-        await query.edit_message_text(promo_txt, parse_mode=ParseMode.HTML, reply_markup=filter_kb)
+        await query.edit_message_text(promo_txt, parse_mode=ParseMode.HTML)
         return
+        # --- END DEBUG ---
         
     status = result.get("status")
     
     if status == "fresh":
         if trial_tersisa > 0:
-            # Pakai jatah trial
-            ctx.user_data['trial_kopken'] = trial_tersisa - 1
+            db.set_trial_kopken(user.id, trial_tersisa - 1)
             reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n🎁 Kamu menggunakan 1x Free Trial cek. Sisa trial: {trial_tersisa-1}x."
         else:
             u = db.get_user(user.id)
