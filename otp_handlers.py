@@ -285,16 +285,13 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 # === KUNCI PERUBAHAN: TIMER HAPUS & KIRIM ULANG ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
-    current_msg_id = msg_id
     
     while True:
-        await asyncio.sleep(5) # Jeda 5 detik tiap update
+        await asyncio.sleep(5) 
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
         if time_left <= 0:
-            try: await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
-            except: pass
             break
             
         order = db.get_otp_order(order_id)
@@ -304,18 +301,21 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
         try:
-            # HAPUS PESAN LAMA, KIRIM PESAN BARU
-            await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            # DEBUG: Paksa hapus pesan lama
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            
+            # DEBUG: Kirim pesan baru, simpan ID baru ke variable
             new_msg = await bot.send_message(
                 chat_id=chat_id, 
                 text=ui_text, 
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_order_inline_keyboard("Menunggu OTP")
             )
-            current_msg_id = new_msg.message_id
-        except Exception:
-            pass
-
+            msg_id = new_msg.message_id # Update ID pesan lama ke ID baru
+            
+        except Exception as e:
+            # INI YANG PENTING: Biar error-nya kelihatan di Railway
+            print(f"[TIMER ERROR] {e}")
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
