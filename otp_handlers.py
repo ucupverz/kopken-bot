@@ -34,7 +34,6 @@ async def get_otp_keyboard():
         "shopee filter": "Shope Asoy"
     }
     
-    # Pakai lower() biar ga case-sensitive
     stock_map = {}
     for s in services:
         clean_name = s['name'].strip().lower()
@@ -61,7 +60,6 @@ def build_all_services_inline(services):
         "shopee": "Shope Gacha",
         "shopee filter": "Shope Asoy"
     }
-    
     keyboard = []
     row = []
     for s in services:
@@ -256,8 +254,10 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
     msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
-    ctx.user_data['ui_msg_id'] = msg_ui.message_id
+    
+    # Simpan msg_id di sini
     ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
+    ctx.user_data['ui_msg_id'] = msg_ui.message_id
     
     asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, display_name, ph, 1200))
     asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph))
