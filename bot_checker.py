@@ -530,6 +530,34 @@ async def lifespan(app: FastAPI):
     await bot_app.stop()
     await bot_app.shutdown()
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global bot_app
+    await bot_app.initialize()
+    await bot_app.start()
+    
+    # === TAMBAHIN INI BUAT BERSIHIN LOOP SFOOD ===
+    try:
+        with db.get_conn() as conn:
+            conn.execute("UPDATE sfood_orders SET status = 'done' WHERE status = 'active'")
+            print("✅ Semua sfood_orders nyangkut di-set done.")
+    except Exception as e:
+        print(f"⚠️ Gagal bersihin sfood_orders: {e}")
+    # =============================================
+    
+    await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram-webhook", drop_pending_updates=True)
+    print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
+    
+    # (Kalo lu mau matiin total SFOOD, komen baris di bawah ini)
+    # asyncio.create_task(tracker_worker(bot_app.bot))
+    # print("[SFOOD] Tracker worker started")
+    
+    asyncio.create_task(bg_check_stuck_orders(bot_app))
+    print("[CRON] Background refunder started")
+    yield
+    await bot_app.stop()
+    await bot_app.shutdown()
+
 api_app = FastAPI(lifespan=lifespan)
 
 @api_app.post("/telegram-webhook")
