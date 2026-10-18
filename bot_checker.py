@@ -174,23 +174,24 @@ async def cmd_balance(update, ctx):
     if not u:
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
-    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     
-    trxs = db.get_user_transactions(user.id, limit=10)
+    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+    history = db.get_saldo_history(user.id, limit=5) # Ambil 5 transaksi terakhir
     
-    text = f"💰 *Balance Kamu*\n\nSaldo saat ini: *Rp {balance:,}*\n\n"
-    text += "🧾 *10 Transaksi Terakhir:*\n"
+    text = f"💰 *Balance Kamu*\n\n"
+    text += f"Saldo saat ini: *Rp {saldo:,}*\n\n"
+    text += f"📜 *5 Transaksi Terakhir:*\n"
     
-    if not trxs:
-        text += "_(Belum ada transaksi)_"
+    if not history:
+        text += "_Belum ada transaksi._"
     else:
-        import datetime as dtmod
-        for t in trxs:
-            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-            if t['type'] == 'IN':
-                text += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+        for h in history:
+            # Format jam
+            tgl = datetime.fromisoformat(h['created_at']).strftime("%H:%M")
+            if h['amount'] > 0:
+                text += f"🟢 +Rp {h['amount']:,} | {h['description']} ({tgl}) -> Sisa: Rp {h['final_saldo']:,}\n"
             else:
-                text += f"🔴 -Rp {t['amount']:,} | {t['description']} ({jam})\n"
+                text += f"🔴 -Rp {abs(h['amount']):,} | {h['description']} ({tgl}) -> Sisa: Rp {h['final_saldo']:,}\n"
                 
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
