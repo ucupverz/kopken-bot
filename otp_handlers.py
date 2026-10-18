@@ -287,12 +287,11 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
     start_time = time.time()
     
     while True:
-        await asyncio.sleep(5) # Update tiap 5 detik
+        await asyncio.sleep(5) 
         
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
-        # Kalkulasi sisa waktu (Local)
         if time_left <= 0:
             try: await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except: pass
@@ -305,7 +304,6 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
         try:
-            # EDIT PESAN (MESKIPUN KENA RATE LIMIT, ANGKANYA TETEP UPDATE)
             await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=msg_id, 
@@ -314,7 +312,7 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
                 reply_markup=get_order_inline_keyboard("Menunggu OTP")
             )
         except BadRequest:
-            pass # Abaikan pesan "Message is not modified" kalau angkanya sama
+            pass # Abaikan error karena pesan sama persis
         except Exception as e:
             print(f"[TIMER] {e}")
 
