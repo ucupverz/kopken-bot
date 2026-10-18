@@ -103,13 +103,11 @@ async def boostly_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
-# === UI TIMER 5 DETIK (ANTI STUCK) ===
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = time_left // 60
     detik = time_left % 60
     
     if status == "Menunggu OTP":
-        # Format progress bar
         total_blocks = 20
         sisa_blocks = int((time_left / 1200) * total_blocks)
         if sisa_blocks < 0: sisa_blocks = 0
@@ -294,14 +292,16 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
-    last_text = ""
+    current_msg_id = msg_id
     
     while True:
-        await asyncio.sleep(5) # <--- UPDATE TIAP 5 DETIK (ANTI STUCK)
+        await asyncio.sleep(5) # Jeda 5 detik tiap update
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
         if time_left <= 0:
+            try: await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            except: pass
             break
             
         order = db.get_otp_order(order_id)
@@ -310,19 +310,16 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
             
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
-        # Cek kalau teksnya sama, skip biar ga kena limit API
-        if ui_text == last_text:
-            continue
-        last_text = ui_text
-        
         try:
-            await bot.edit_message_text(
+            # HAPUS PESAN LAMA, KIRIM PESAN BARU BIAR GA STUCK
+            await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            new_msg = await bot.send_message(
                 chat_id=chat_id, 
-                message_id=msg_id, 
                 text=ui_text, 
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_order_inline_keyboard("Menunggu OTP")
             )
+            current_msg_id = new_msg.message_id
         except Exception:
             pass
 
@@ -346,13 +343,8 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
             ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
             try:
-                await bot.edit_message_text(
-                    chat_id=user_id, 
-                    message_id=msg_id, 
-                    text=ui_text, 
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_inline_keyboard("Selesai")
-                )
+                await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             except Exception:
                 pass
             return
@@ -366,7 +358,8 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         await wahub_client.mark_done(order_id)
         ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
         try:
-            await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
+            await bot.delete_message(chat_id=user_id, message_id=msg_id)
+            await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
         except Exception:
             pass
         return
@@ -380,13 +373,8 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
             ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {db_order['price']:,} dikembalikan."
             try:
-                await bot.edit_message_text(
-                    chat_id=user_id, 
-                    message_id=msg_id, 
-                    text=ui_text, 
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_inline_keyboard("Selesai")
-                )
+                await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             except Exception:
                 pass
 
