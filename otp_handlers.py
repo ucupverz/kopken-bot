@@ -11,7 +11,6 @@ import database as db
 import wahub_client
 import dehuyz_automation
 
-# === NAMA BARU ===
 QUICK_SERVICES = ["Kopken Gacha", "Kopken Asoy", "Shope Gacha", "Shope Asoy"] 
 MARGIN = 700
 BIAYA_CEK_FRESH = 200
@@ -82,6 +81,7 @@ def build_all_services_inline(services):
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
+# === FUNGSI API BOOSTLY (FIXED) ===
 async def boostly_cek_single(nomor):
     phone = nomor
     if phone.startswith("62"):
@@ -100,9 +100,10 @@ async def boostly_cek_single(nomor):
                 data_api = resp_json.get("data", {})
                 status_api = data_api.get("status", "").upper()
                 
-                if status_api == "TERDAFTAR":
+                # Nangkep teks dari API (TERDAFTAR / BELUM TERDAFTAR / FRESH)
+                if status_api in ["TERDAFTAR", "REGISTERED"]:
                     return {"success": True, "status": "registered", "name": data_api.get("name")}
-                elif status_api == "FRESH":
+                elif status_api in ["BELUM TERDAFTAR", "FRESH", "NOT REGISTERED"]:
                     return {"success": True, "status": "fresh", "name": None}
                     
             return {"success": False, "detail": "Format respon API tidak dikenal", "raw": resp_json}
