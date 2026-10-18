@@ -143,7 +143,6 @@ def get_order_inline_keyboard(status="Menunggu OTP"):
             ]
         ])
     else:
-        # Ini tombol pas OTP udah masuk, Batal & Refund hilang
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data="otp_act_resend"),
@@ -281,17 +280,26 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
-
-# === LOGIC HAPUS & KIRIM ULANG (TIMER REALTIME) ===
+# === LOGIC TIMER NGIKUTIN SISA WAKTU DEHUYZ (REALTIME) ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
-    start_time = time.time()
     current_msg_id = msg_id
     
     while True:
-        await asyncio.sleep(5) # Cek tiap 5 detik biar ga rate limit
-        elapsed = int(time.time() - start_time)
-        time_left = total_time - elapsed
+        await asyncio.sleep(5) # Cek tiap 5 detik
         
+        # Ambil status asli dari API Dehuyz
+        res, status = await wahub_client.get_order_status(order_id)
+        
+        if status == 200 and res:
+            # Dehuyz ngasih sisa detik di field 'remaining_time' (atau 'time_left')
+            time_left = res.get('remaining_time') or res.get('time_left') or res.get('expired_in')
+            
+            # Kalau API ga ngasih sisa waktu, fallback ke hitungan lokal
+            if time_left is None:
+                time_left = total_time - int(time.time() - start_time)
+        else:
+            time_left = total_time - int(time.time() - start_time)
+
         if time_left <= 0:
             try: await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
             except: pass
@@ -299,13 +307,12 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
             
         order = db.get_otp_order(order_id)
         if not order or order['status'] != 'waiting':
-            # Hapus pesan timer kalau OTP udah masuk (ditangani sama poll_otp_bg)
             break
             
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
         try:
-            # HAPUS PESAN LAMA, KIRIM PESAN BARU
+            # HAPUS PESAN LAMA, KIRIM PESAN BARU (BIAR GA RATE LIMIT)
             await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
             new_msg = await bot.send_message(
                 chat_id=chat_id, 
@@ -334,15 +341,12 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             db.update_otp_order_status(order_id, 'success', otp)
             await wahub_client.mark_done(order_id)
             
-            # TIMER SELESAI, GANTI JADI UI OTP MASUK
             ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
             try:
-                # Hapus pesan timer
                 await bot.delete_message(chat_id=user_id, message_id=msg_id)
             except Exception:
                 pass
             
-            # Kirim pesan baru pake UI "Selesai" (Tombol berubah)
             await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             return
             
