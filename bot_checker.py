@@ -21,8 +21,8 @@ import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
-    BIAYA_CEK_FRESH, handle_cek_kopken_callback, 
-    handle_order_action_callback, handle_buy_filter_auto_cancel_callback
+    handle_cek_kopken_callback, handle_order_action_callback, 
+    handle_buy_filter_auto_cancel_callback
 )
 
 from sfood_handlers import (
@@ -80,41 +80,34 @@ def sanitize_voc_input(text):
     if len(t) < 3 or len(t) > 50: return None
     return t
 
+# === KEYBOARD BARU (BALANCE, NO KUOTA) ===
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        ["☕ Cek Kopken", "📊 Kuota Saya"],
-        ["📱 WhatsApp OTP", "🔑 Pakai Kode VOC"],
+        ["💰 Cek Balance", "🔑 Pakai Kode VOC"],
+        ["📱 WhatsApp OTP"],
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
-        ["☕ Cek Kopken", "📊 Kuota Saya"],
-        ["📱 WhatsApp OTP", "🔑 Pakai Kode VOC"],
+        ["💰 Cek Balance", "🔑 Pakai Kode VOC"],
+        ["📱 WhatsApp OTP"],
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "🔧 Admin Panel"],
         ["❓ Bantuan"]
     ], resize_keyboard=True)
-
-async def nasky_cek_single(nomor):
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post(f"{NASKY_BASE}/api/cek", headers={"X-API-Key": NASKY_API_KEY}, json={"code": "kopken", "nomor": nomor})
-            return r.json()
-        except Exception as e: return {"success": False, "detail": f"Network error: {e}"}
 
 async def cmd_start(update, ctx):
     user = update.effective_user
     db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
     kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     text = (
         f"Halo {user.first_name}! 👋\n\n"
         f"☕ *Bot Multi Fungsi*\n\n"
-        f"📊 Kuota kamu: *{u['quota']}x cek*\n"
-        f"💰 Saldo OTP kamu: *Rp {saldo:,}*\n\n"
+        f"💰 Balance kamu: *Rp {balance:,}*\n\n"
         f"Ketik `/help` untuk bantuan."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
@@ -122,8 +115,8 @@ async def cmd_start(update, ctx):
 async def cmd_help(update, ctx):
     text = (
         "📖 *Bantuan*\n\n"
-        "*☕ Cek Nomor Kopi Kenangan:*\n"
-        "• Kirim nomor HP (1 atau banyak, pisah baris)\n\n"
+        "*📱 OTP:*\n"
+        "• Klik tombol WhatsApp OTP di keyboard\n\n"
         "*🍔 ShopeeFood Tracker:*\n"
         "• Kirim link tracker + label\n"
         "• `/sfood` — Menu tracker\n\n"
@@ -132,25 +125,21 @@ async def cmd_help(update, ctx):
         "• `/sfood_metrics <order_id>` — Statistik order\n\n"
         "*📊 Tarif:*\n"
         "• `/tarif <angka>` — Input biaya layanan\n\n"
-        "*📱 OTP:*\n"
-        "• Klik tombol WhatsApp OTP di keyboard\n\n"
         "*Commands:*\n"
-        "/start, /help, /kuota, /sfood, /telemetry, /tarif"
+        "/start, /help, /balance, /sfood, /telemetry, /tarif"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-async def cmd_kuota(update, ctx):
+async def cmd_balance(update, ctx):
     user = update.effective_user
     u = db.get_user(user.id)
     if not u:
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     await update.message.reply_text(
-        f"📊 *Kuota Kamu*\n\n"
-        f"Sisa kuota: *{u['quota']}x cek*\n"
-        f"Total cek: {u['total_cek']}x\n"
-        f"💰 Saldo OTP: *Rp {saldo:,}*",
+        f"💰 *Balance Kamu*\n\n"
+        f"Saldo saat ini: *Rp {balance:,}*",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -176,13 +165,8 @@ async def handle_message(update, ctx):
         await handle_sfood_message(update, ctx)
         return
 
-    if text == "☕ Cek Kopken":
-        if u["quota"] <= 0: await update.message.reply_text("❌ Kuota habis. Kirim VOC atau minta admin.")
-        else: await update.message.reply_text("Kirim nomor HP yang mau dicek, contoh:\n`081234567890`", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "📊 Kuota Saya":
-        await cmd_kuota(update, ctx)
+    if text == "💰 Cek Balance":
+        await cmd_balance(update, ctx)
         return
 
     if text == "📱 WhatsApp OTP":
@@ -223,8 +207,8 @@ async def handle_message(update, ctx):
 
     if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n📊 Kuota: <b>{u['quota']}x cek</b>\n💰 Saldo OTP: <b>Rp {saldo:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+        balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+        await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     if text == "💰 Deposit Saldo":
@@ -257,154 +241,22 @@ async def handle_message(update, ctx):
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
 
-    # ========== TOMBOL OTP ==========
-    if text == "🔄 Kirim Ulang OTP":
-        last_order = ctx.user_data.get('last_order')
-        if not last_order:
-            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
-            return
-        res, code = await wahub_client.retry_otp(last_order['token'])
-        if code == 200:
-            await update.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
-        else:
-            await update.message.reply_text("❌ Gagal minta ulang OTP. Mungkin batas retry habis atau waktu sewa habis.")
-        return
-
+    # Pakai VOC buat nambah Balance
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
-        success, message, quota = db.use_voc(text_upper, user.id)
+        success, message, quota = db.use_voc(text_upper, user.id) # quota di sini lu ubah jadi nominal uang misal Rp 5000
         if success:
-            await update.message.reply_text(f"✅ *{message}*\n\nSekarang kamu punya *{db.get_user(user.id)['quota']}x* kuota.", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"✅ *{message}*\n\nSekarang Balance kamu: *Rp {db.get_user(user.id)['saldo']:,}*.", parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text(f"❌ {message}")
         return
 
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-    if len(lines) == 1 and is_valid_phone(lines[0]):
-        if u["quota"] <= 0:
-            await update.message.reply_text("❌ Kuota habis.")
-            return
-        msg = await update.message.reply_text("🔍 Mengecek...")
-        start_time = time.time()
-        result = await nasky_cek_single(normalize_phone(lines[0]))
-        elapsed = time.time() - start_time
-        if not result.get("success"):
-            await msg.edit_text(f"❌ Error: {result.get('detail', 'Unknown')}")
-            return
-        d = result["data"]
-        status = d["status"]
-        phone_display = format_phone_display(d["phone"])
-        if status == "fresh":
-            db.use_quota(user.id)
-            db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
-        else:
-            db.add_transaction(user.id, "cek", 0, "success", f"{status} {d['phone']}")
-        new_quota = db.get_user(user.id)["quota"]
-        if status == "fresh":
-            reply = (f"📊 HASIL PENGECEKAN NOMOR\n\n"
-                     f"❌ BELUM TERDAFTAR [1]:\n{phone_display}\n\n"
-                     f"⏱️ Waktu: {elapsed:.2f} detik\n"
-                     f"💳 Sisa Kuota: {new_quota} Kredit")
-        elif status == "registered":
-            reply = (f"📊 HASIL PENGECEKAN NOMOR\n\n"
-                     f"✅ TERDAFTAR [1]:\n{phone_display} | {d.get('customer_name') or '-'}\n\n"
-                     f"⏱️ Waktu: {elapsed:.2f} detik\n"
-                     f"💳 Sisa Kuota: {new_quota} Kredit")
-        else:
-            reply = f"❓ Status tidak dikenal: `{status}`"
-        await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    valid = [normalize_phone(l) for l in lines if is_valid_phone(l)]
-    if valid:
-        if u["quota"] < len(valid):
-            await update.message.reply_text(f"❌ Kuota tidak cukup (butuh {len(valid)}x).")
-            return
-        msg = await update.message.reply_text(f"🔍 Mengecek {len(valid)} nomor...")
-        start_time = time.time()
-        fresh_list = []
-        reg_list = []
-        invalid_list = []
-        for nomor in valid:
-            r = await nasky_cek_single(nomor)
-            if not r.get("success"):
-                invalid_list.append(nomor)
-                continue
-            d = r["data"]
-            phone_display = format_phone_display(d["phone"])
-            if d["status"] == "fresh":
-                fresh_list.append(phone_display)
-                db.use_quota(user.id)
-                db.add_transaction(user.id, "cek", 1, "success", f"FRESH {d['phone']}")
-            elif d["status"] == "registered":
-                reg_list.append((phone_display, d.get("customer_name") or "-"))
-                db.add_transaction(user.id, "cek", 0, "success", f"REG {d['phone']}")
-            else:
-                invalid_list.append(phone_display)
-        elapsed = time.time() - start_time
-        new_quota = db.get_user(user.id)["quota"]
-        out_lines = ["📊 HASIL PENGECEKAN NOMOR", ""]
-        if reg_list:
-            out_lines.append(f"✅ TERDAFTAR [{len(reg_list)}]:")
-            for ph, nm in reg_list:
-                out_lines.append(f"{ph} | {nm}")
-            out_lines.append("")
-        if fresh_list:
-            out_lines.append(f"❌ BELUM TERDAFTAR [{len(fresh_list)}]:")
-            for ph in fresh_list:
-                out_lines.append(ph)
-            out_lines.append("")
-        if invalid_list:
-            out_lines.append(f"⚠️ INVALID [{len(invalid_list)}]:")
-            for ph in invalid_list:
-                out_lines.append(ph)
-            out_lines.append("")
-        out_lines.append(f"⏱️ Waktu: {elapsed:.2f} detik")
-        out_lines.append(f"💳 Sisa Kuota: {new_quota} Kredit")
-        await msg.edit_text("\n".join(out_lines))
-        file_out = ["=" * 40, "HASIL PENGECEKAN NOMOR", "=" * 40, ""]
-        if reg_list:
-            file_out.append(f"TERDAFTAR [{len(reg_list)}]:")
-            for ph, nm in reg_list:
-                file_out.append(f"{ph} | {nm}")
-            file_out.append("")
-        if fresh_list:
-            file_out.append(f"BELUM TERDAFTAR [{len(fresh_list)}]:")
-            for ph in fresh_list:
-                file_out.append(ph)
-            file_out.append("")
-        if invalid_list:
-            file_out.append(f"INVALID [{len(invalid_list)}]:")
-            for ph in invalid_list:
-                file_out.append(ph)
-            file_out.append("")
-        file_bytes = "\n".join(file_out).encode("utf-8")
-        await update.message.reply_document(document=file_bytes, filename="hasil_cek.txt")
-        return
-
     await update.message.reply_text("❌ Format tidak dikenali.")
-    
-async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    data_parts = query.data.split("_")
-    if len(data_parts) < 4 or data_parts[1] == "none": return
-    service_id = int(data_parts[2])
-    harga_jual = int(data_parts[3])
-    service_name = data_parts[4]
-    ctx.user_data['buy_service'] = service_name
-    ctx.user_data['buy_qty'] = 1
-    ctx.user_data['buy_total'] = harga_jual
-    ctx.user_data['buy_id'] = service_id
-    await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML)
-    ctx.user_data['buy_state'] = 'WAITING_QTY'
 
 async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n🔑 VOC aktif: {s['active_voc']}\n🔑 Total VOC: {s['total_voc']}\n\n*Generate VOC:* `/genvoc` `[kuota]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addkuota <id> <n>` `/addsaldo <id> <n>`"
+    text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n\n*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_genvoc(update, ctx):
@@ -414,7 +266,7 @@ async def cmd_genvoc(update, ctx):
         for _ in range(10):
             code = gen_voc_code()
             if db.create_voc(code, DEFAULT_VOC_QUOTA, update.effective_user.id):
-                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{DEFAULT_VOC_QUOTA}x*", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nIsi Balance: *Rp {DEFAULT_VOC_QUOTA}x*", parse_mode=ParseMode.MARKDOWN)
                 return
         return
     if len(args) == 1 and args[0].isdigit():
@@ -422,20 +274,20 @@ async def cmd_genvoc(update, ctx):
         for _ in range(10):
             code = gen_voc_code()
             if db.create_voc(code, quota, update.effective_user.id):
-                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nKuota: *{quota}x*", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nIsi Balance: *Rp {quota:,}*", parse_mode=ParseMode.MARKDOWN)
                 return
         return
     if len(args) == 1:
         custom = sanitize_voc_input(args[0])
         if not custom: await update.message.reply_text("❌ Kode tidak valid."); return
-        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {DEFAULT_VOC_QUOTA}x", parse_mode=ParseMode.MARKDOWN)
+        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Balance: Rp {DEFAULT_VOC_QUOTA}x", parse_mode=ParseMode.MARKDOWN)
         else: await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
         return
     if len(args) >= 2:
         custom = sanitize_voc_input(args[0])
-        if not custom or not args[1].isdigit(): await update.message.reply_text("❌ Format: `/genvoc <KODE> <KUOTA>`", parse_mode=ParseMode.MARKDOWN); return
+        if not custom or not args[1].isdigit(): await update.message.reply_text("❌ Format: `/genvoc <KODE> <SALDO>`", parse_mode=ParseMode.MARKDOWN); return
         quota = int(args[1])
-        if db.create_voc(custom, quota, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Kuota: {quota}x", parse_mode=ParseMode.MARKDOWN)
+        if db.create_voc(custom, quota, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Balance: Rp {quota:,}", parse_mode=ParseMode.MARKDOWN)
         else: await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
 
 async def cmd_listvoc(update, ctx):
@@ -445,7 +297,7 @@ async def cmd_listvoc(update, ctx):
     lines = ["🔑 *20 Kode VOC Terakhir*\n"]
     for r in rows:
         status = "🟢" if r["active"] else "🔴"
-        lines.append(f"{status} `{r['code']}` — {r['quota']}x")
+        lines.append(f"{status} `{r['code']}` — Rp {r['quota']:,}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_revoke(update, ctx):
@@ -453,16 +305,6 @@ async def cmd_revoke(update, ctx):
     if not ctx.args: await update.message.reply_text("Usage: `/revoke <kode>`", parse_mode=ParseMode.MARKDOWN); return
     db.revoke_voc(ctx.args[0].upper())
     await update.message.reply_text(f"✅ Kode `{ctx.args[0].upper()}` dinonaktifkan.", parse_mode=ParseMode.MARKDOWN)
-
-async def cmd_addkuota(update, ctx):
-    if not is_admin(update.effective_user.id): return
-    if len(ctx.args) < 2: await update.message.reply_text("Usage: `/addkuota <id> <n>`", parse_mode=ParseMode.MARKDOWN); return
-    try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
-    except ValueError: return
-    if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
-    db.add_quota(uid, amt)
-    new_q = db.get_user(uid)["quota"]
-    await update.message.reply_text(f"✅ Kuota user `{uid}` +{amt}. Total: {new_q}x", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_addsaldo(update, ctx):
     if not is_admin(update.effective_user.id): return
@@ -477,7 +319,7 @@ async def cmd_addsaldo(update, ctx):
 async def cmd_stats(update, ctx):
     if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    await update.message.reply_text(f"📊 *Statistik*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n🔑 VOC aktif: {s['active_voc']}\n🔑 VOC total: {s['total_voc']}", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📊 *Statistik*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_users(update, ctx):
     if not is_admin(update.effective_user.id): return
@@ -490,7 +332,7 @@ async def cmd_users(update, ctx):
         name = u['first_name'] or "(no name)"
         dt = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
         saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-        lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Kuota: {u['quota']}x | Saldo: Rp {saldo:,} | {dt}")
+        lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Balance: Rp {saldo:,} | {dt}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_userinfo(update, ctx):
@@ -504,10 +346,10 @@ async def cmd_userinfo(update, ctx):
     dt = dtmod.datetime.fromtimestamp(user['created_at']).strftime("%d/%m/%Y %H:%M")
     uname = f"@{user['username']}" if user['username'] else "(no uname)"
     saldo = user['saldo'] if user and 'saldo' in user.keys() else 0
-    text = f"👤 *Detail User*\n\nID: `{user['user_id']}`\nUsername: {uname}\nNama: {user['first_name'] or '-'}\n\n📊 Kuota: *{user['quota']}x*\n💰 Saldo OTP: *Rp {saldo:,}*\n☕ Total cek: {user['total_cek']}x\n📅 Daftar: {dt}\n\n"
+    text = f"👤 *Detail User*\n\nID: `{user['user_id']}`\nUsername: {uname}\nNama: {user['first_name'] or '-'}\n\n💰 Balance: *Rp {saldo:,}*\n📅 Daftar: {dt}\n\n"
     if vocs:
         text += f"🔑 *VOC dipakai ({len(vocs)}):*\n"
-        for v in vocs: text += f"• `{v['code']}` — {v['quota']}x\n"
+        for v in vocs: text += f"• `{v['code']}` — Rp {v['quota']:,}\n"
     else: text += "🔑 Belum pernah redeem VOC."
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -519,7 +361,7 @@ async def cmd_vocdetail(update, ctx):
     if not voc: await update.message.reply_text(f"❌ Kode `{code}` tidak ditemukan."); return
     import datetime as dtmod
     dt = dtmod.datetime.fromtimestamp(voc['created_at']).strftime("%d/%m/%Y %H:%M")
-    text = f"🔑 *Detail Kode VOC*\n\nKode: `{voc['code']}`\nKuota: {voc['quota']}x\nDibuat: {dt}\nStatus: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n\n"
+    text = f"🔑 *Detail Kode VOC*\n\nKode: `{voc['code']}`\nBalance: Rp {voc['quota']:,}\nDibuat: {dt}\nStatus: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n\n"
     if user:
         used_at = dtmod.datetime.fromtimestamp(voc['used_at']).strftime("%d/%m/%Y %H:%M") if voc['used_at'] else "-"
         uname = f"@{user['username']}" if user['username'] else "(no uname)"
@@ -583,13 +425,14 @@ async def process_webhook_otp(order_id, otp):
 
 def main():
     global bot_app
-    if not BOT_TOKEN or not NASKY_API_KEY:
-        print("❌ BOT_TOKEN atau NASKY_API_KEY belum di-set"); return
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN belum di-set"); return
     db.init_db()
     bot_app = Application.builder().token(BOT_TOKEN).build()
+    
     bot_app.add_handler(CommandHandler("start", cmd_start))
     bot_app.add_handler(CommandHandler("help", cmd_help))
-    bot_app.add_handler(CommandHandler("kuota", cmd_kuota))
+    bot_app.add_handler(CommandHandler("balance", cmd_balance))
     bot_app.add_handler(CommandHandler("sfood", cmd_sfood))
     bot_app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
     bot_app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
@@ -611,19 +454,21 @@ def main():
     bot_app.add_handler(CommandHandler("genvoc", cmd_genvoc))
     bot_app.add_handler(CommandHandler("listvoc", cmd_listvoc))
     bot_app.add_handler(CommandHandler("revoke", cmd_revoke))
-    bot_app.add_handler(CommandHandler("addkuota", cmd_addkuota))
     bot_app.add_handler(CommandHandler("addsaldo", cmd_addsaldo))
     bot_app.add_handler(CommandHandler("stats", cmd_stats))
     bot_app.add_handler(CommandHandler("users", cmd_users))
     bot_app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
+    
     bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
     bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act_"))
     bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_filter_auto_cancel_callback, pattern=r"^otp_buyfilter_"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
+    
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     print("🌐 Web Server (FastAPI) jalan di port 8080")
     uvicorn.run(api_app, host="0.0.0.0", port=8080, log_level="info")
 
