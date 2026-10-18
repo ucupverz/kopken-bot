@@ -137,11 +137,26 @@ async def cmd_balance(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
     balance = u['saldo'] if u and 'saldo' in u.keys() else 0
-    await update.message.reply_text(
-        f"💰 *Balance Kamu*\n\n"
-        f"Saldo saat ini: *Rp {balance:,}*",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    
+    # Ambil history
+    trxs = db.get_user_transactions(user.id, limit=10)
+    
+    text = f"💰 *Balance Kamu*\n\nSaldo saat ini: *Rp {balance:,}*\n\n"
+    text += "🧾 *10 Transaksi Terakhir:*\n"
+    
+    if not trxs:
+        text += "_(Belum ada transaksi)_"
+    else:
+        for t in trxs:
+            # Format jam
+            import datetime as dtmod
+            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+            if t['type'] == 'IN':
+                text += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            else:
+                text += f"🔴 -Rp {t['amount']:,} | {t['description']} ({jam})\n"
+                
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_message(update, ctx):
     text = (update.message.text or "").strip()

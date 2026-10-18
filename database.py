@@ -5,13 +5,12 @@ import datetime
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None) # isolation_level=None biar bisa BEGIN IMMEDIATE
+    conn = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     with get_conn() as conn:
-        # Users Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -22,8 +21,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # OTP Orders Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS otp_orders (
                 order_id TEXT PRIMARY KEY,
@@ -37,8 +34,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # VOC Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS voc_codes (
                 code TEXT PRIMARY KEY,
@@ -50,13 +45,23 @@ def init_db():
                 used_at TIMESTAMP
             )
         """)
+        # === TABEL BARU BUAT HISTORY BALANCE ===
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount INTEGER,
+                type TEXT,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         print("✅ Database initialized.")
 
-# === ATOMIC SALDO (ANTI RACE CONDITION) ===
-def deduct_saldo(user_id, amount):
+def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE") # Lock database
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             if not row or row['saldo'] < amount:
@@ -64,6 +69,7 @@ def deduct_saldo(user_id, amount):
                 return False
             
             conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
             conn.execute("COMMIT")
             return True
         except Exception as e:
@@ -71,11 +77,12 @@ def deduct_saldo(user_id, amount):
             print(f"[DB] Deduct error: {e}")
             return False
 
-def add_saldo(user_id, amount):
+def add_saldo(user_id, amount, desc="Topup / Refund"):
     with get_conn() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, amount, desc))
             conn.execute("COMMIT")
             return True
         except Exception as e:
@@ -107,7 +114,6 @@ def set_trial_kopken(user_id, sisa):
     with get_conn() as conn:
         conn.execute("UPDATE users SET trial_kopken = ? WHERE user_id = ?", (sisa, user_id))
 
-# === OTP ORDERS ===
 def create_otp_order(user_id, order_id, token, phone, service_name, price):
     with get_conn() as conn:
         conn.execute(
@@ -127,7 +133,6 @@ def get_otp_order(order_id):
         cursor = conn.execute("SELECT * FROM otp_orders WHERE order_id = ?", (order_id,))
         return cursor.fetchone()
 
-# === VOC CODES ===
 def create_voc(code, quota, created_by):
     with get_conn() as conn:
         try:
@@ -153,8 +158,15 @@ def use_voc(code, user_id):
             
             conn.execute("UPDATE voc_codes SET active = 0, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?", (user_id, code))
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (voc['quota'], user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', 'Redeem VOC')", (user_id, voc['quota']))
             conn.execute("COMMIT")
             return True, f"Berhasil klaim Rp {voc['quota']:,}", voc['quota']
         except Exception as e:
             conn.execute("ROLLBACK")
             return False, f"Error: {e}", 0
+
+# === FUNGSI HISTORY BALANCE ===
+def get_user_transactions(user_id, limit=10):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
+        return cursor.fetchall()
