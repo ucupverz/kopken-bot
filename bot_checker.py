@@ -81,18 +81,20 @@ def sanitize_voc_input(text):
     if len(t) < 3 or len(t) > 50: return None
     return t
 
-# === KEYBOARD BARU TANPA TARIF & GABUNG PANTAU KURIR ===
+# === KEYBOARD BARU (TOPUP MUNCUL LAGI) ===
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
-        ["📱 WhatsApp OTP", "🔑 Redeem Invitation Code"],
+        ["📱 WhatsApp OTP", "💳 Topup Balance"],
+        ["🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
-        ["📱 WhatsApp OTP", "🔑 Redeem Invitation Code"],
+        ["📱 WhatsApp OTP", "💳 Topup Balance"],
+        ["🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "🔧 Admin Panel"],
         ["❓ Bantuan"]
     ], resize_keyboard=True)
@@ -118,6 +120,8 @@ async def cmd_help(update, ctx):
         "• Klik tombol Cek Nomor Kopken, lalu masukkan nomor HP.\n\n"
         "*📱 OTP:*\n"
         "• Klik tombol WhatsApp OTP di keyboard\n\n"
+        "*💳 Topup:*\n"
+        "• Klik tombol Topup Balance untuk isi saldo via QRIS\n\n"
         "*🍔 ShopeeFood Tracker:*\n"
         "• Kirim link tracker + label\n"
         "• `/sfood` — Menu tracker (Termasuk Pantau Kurir & Tarif)\n\n"
@@ -218,6 +222,10 @@ async def handle_message(update, ctx):
         await cmd_balance(update, ctx)
         return
 
+    if text == "💳 Topup Balance":
+        await cmd_deposit(update, ctx)
+        return
+
     if text == "📱 WhatsApp OTP":
         await cmd_otp_menu(update, ctx)
         return
@@ -244,10 +252,6 @@ async def handle_message(update, ctx):
         await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    if text == "💰 Deposit Saldo":
-        await cmd_deposit(update, ctx)
-        return
-        
     if text == "📋 Cek Pesanan":
         last_order = ctx.user_data.get('last_order')
         if not last_order:
