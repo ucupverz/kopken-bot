@@ -14,8 +14,10 @@ import dehuyz_automation
 QUICK_SERVICES = ["Kopken", "Kopken Filter", "Shopee", "Shopee Filter"] 
 MARGIN = 700
 BIAYA_CEK_FRESH = 200
-NASKY_BASE = "https://nasky.web.id"
-NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
+
+# === KONFIGURASI API BOOSTLY (PENGGANTI NASKY) ===
+BOOSTLY_BASE = "https://api.boostly.id"
+BOOSTLY_API_KEY = os.getenv("BOOSTLY_API_KEY", "kpk_live_b3fa7a15fd240b44cb12938be0c7774f")
 
 def get_menu_keyboard():
     return ReplyKeyboardMarkup([
@@ -58,10 +60,20 @@ def build_all_services_inline(services):
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-async def nasky_cek_single(nomor):
+# === FUNGSI CEK KOPKEN PAKE BOOSTLY ===
+async def boostly_cek_single(nomor):
+    # Boostly biasanya minta format 08xxx
+    phone = nomor
+    if phone.startswith("62"):
+        phone = "0" + phone[2:]
+
     async with httpx.AsyncClient(timeout=15) as client:
         try:
-            r = await client.post(f"{NASKY_BASE}/api/cek", headers={"X-API-Key": NASKY_API_KEY}, json={"code": "kopken", "nomor": nomor})
+            r = await client.post(
+                f"{BOOSTLY_BASE}/api/v1/check", 
+                headers={"X-API-Key": BOOSTLY_API_KEY}, 
+                json={"phone": phone}
+            )
             return r.json()
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}"}
@@ -258,7 +270,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         return 
 
     start_time = time.time()
-    while time.time() - start_time < 1200: # Loop maksimal 20 menit
+    while time.time() - start_time < 1200: 
         db_order = db.get_otp_order(order_id)
         if not db_order or db_order['status'] != 'waiting':
             return 
@@ -284,7 +296,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
         await asyncio.sleep(15)
         
-    # Kalau 20 menit abis, cek SEKALI LAGI barangkali telat masuk
+    # Cek terakhir sebelum cancel (Anti OTP Telat)
     res, status = await wahub_client.check_otp(token, timeout=15)
     if status == 200 and res.get('state') == 'success':
         otp = res.get('otp')
@@ -297,7 +309,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             pass
         return
         
-    # Kalau 20 menit beneran abis dan tetep ga ada OTP, baru CANCEL
+    # Kalau beneran zonk
     db_order = db.get_otp_order(order_id)
     if db_order and db_order['status'] == 'waiting':
         cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
@@ -331,7 +343,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
         
     if action == "batal":
-        await query.message.reply_text("⏳ Membatalkan pesanan...")
+        await query.edit_message_text("⏳ Membatalkan pesanan...", reply_markup=None)
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         
         if code == 200:
@@ -340,7 +352,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             db.update_otp_order_status(last_order['order_id'], 'cancelled')
             ctx.user_data['last_order'] = None
             
-            await query.edit_message_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} dikembalikan.", reply_markup=None)
+            await query.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {refund:,} dikembalikan.")
             kb = await get_otp_keyboard()
             await query.message.reply_text("Menu OTP:", reply_markup=kb)
         else:
@@ -377,6 +389,12 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         await query.message.reply_text(f"❌ Maaf, stok {service_name} lagi kosong. Coba lagi nanti.")
         return
 
+    # HAPUS PESAN LAMA SEBELUM PROSES
+    try:
+        await query.delete_message()
+    except Exception:
+        pass
+        
     await query.message.reply_text("⏳ Membatalkan nomor lama & memproses nomor baru...")
     
     cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
@@ -508,9 +526,12 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
     
     await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
-    result = await nasky_cek_single(phone)
     
-    if not result.get("success"):
+    # Panggil API Boostly
+    result = await boostly_cek_single(phone)
+    
+    # Boostly ngebalikin format {"status": "fresh", "name": "..."} atau {"status":"registered"}
+    if not result.get("success") and not result.get("status"):
         services = await wahub_client.get_services()
         target_filter = next((s for s in services if s['name'].lower() == "kopken filter"), None)
         
@@ -530,17 +551,17 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         await query.edit_message_text(promo_txt, parse_mode=ParseMode.HTML, reply_markup=filter_kb)
         return
         
-    d = result["data"]
-    if d["status"] == "fresh":
+    status = result.get("status")
+    if status == "fresh":
         if saldo < BIAYA_CEK_FRESH:
             await query.edit_message_text(f"❌ Saldo tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
             return
         db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
         reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Saldo terpotong: Rp {BIAYA_CEK_FRESH:,}."
-    elif d["status"] == "registered":
-        reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {d.get('customer_name') or '-'}\n\n💳 Cek GRATIS."
+    elif status == "registered":
+        reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {result.get('name') or '-'}\n\n💳 Cek GRATIS."
     else:
-        reply = f"❓ Status tidak dikenal: `{d['status']}`"
+        reply = f"❓ Status tidak dikenal: `{status}`"
         
     await query.edit_message_text(reply, parse_mode=ParseMode.MARKDOWN)
 
