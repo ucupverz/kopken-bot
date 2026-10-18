@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 import database as db
 import wahub_client
@@ -280,28 +281,20 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
-# === LOGIC TIMER NGIKUTIN SISA WAKTU DEHUYZ (REALTIME) ===
+
+# === TIMER REALTIME (EDIT MESSAGE) ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
-    current_msg_id = msg_id
+    start_time = time.time()
     
     while True:
-        await asyncio.sleep(5) # Cek tiap 5 detik
+        await asyncio.sleep(5) # Update tiap 5 detik
         
-        # Ambil status asli dari API Dehuyz
-        res, status = await wahub_client.get_order_status(order_id)
+        elapsed = int(time.time() - start_time)
+        time_left = total_time - elapsed
         
-        if status == 200 and res:
-            # Dehuyz ngasih sisa detik di field 'remaining_time' (atau 'time_left')
-            time_left = res.get('remaining_time') or res.get('time_left') or res.get('expired_in')
-            
-            # Kalau API ga ngasih sisa waktu, fallback ke hitungan lokal
-            if time_left is None:
-                time_left = total_time - int(time.time() - start_time)
-        else:
-            time_left = total_time - int(time.time() - start_time)
-
+        # Kalkulasi sisa waktu (Local)
         if time_left <= 0:
-            try: await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
+            try: await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except: pass
             break
             
@@ -312,17 +305,19 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         ui_text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", time_left)
         
         try:
-            # HAPUS PESAN LAMA, KIRIM PESAN BARU (BIAR GA RATE LIMIT)
-            await bot.delete_message(chat_id=chat_id, message_id=current_msg_id)
-            new_msg = await bot.send_message(
+            # EDIT PESAN (MESKIPUN KENA RATE LIMIT, ANGKANYA TETEP UPDATE)
+            await bot.edit_message_text(
                 chat_id=chat_id, 
+                message_id=msg_id, 
                 text=ui_text, 
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_order_inline_keyboard("Menunggu OTP")
             )
-            current_msg_id = new_msg.message_id
+        except BadRequest:
+            pass # Abaikan pesan "Message is not modified" kalau angkanya sama
         except Exception as e:
-            print(f"[TIMER ERROR] {e}")
+            print(f"[TIMER] {e}")
+
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
@@ -343,11 +338,15 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
             ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
             try:
-                await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                await bot.edit_message_text(
+                    chat_id=user_id, 
+                    message_id=msg_id, 
+                    text=ui_text, 
+                    parse_mode=ParseMode.HTML, 
+                    reply_markup=get_order_inline_keyboard("Selesai")
+                )
             except Exception:
                 pass
-            
-            await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             return
             
         await asyncio.sleep(15)
@@ -359,8 +358,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         await wahub_client.mark_done(order_id)
         ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
         try:
-            await bot.delete_message(chat_id=user_id, message_id=msg_id)
-            await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
+            await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
         except Exception:
             pass
         return
@@ -374,8 +372,13 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
             ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {db_order['price']:,} dikembalikan."
             try:
-                await bot.delete_message(chat_id=user_id, message_id=msg_id)
-                await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
+                await bot.edit_message_text(
+                    chat_id=user_id, 
+                    message_id=msg_id, 
+                    text=ui_text, 
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard("Selesai")
+                )
             except Exception:
                 pass
 
