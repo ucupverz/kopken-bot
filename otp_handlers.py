@@ -2,6 +2,7 @@ import asyncio
 import httpx
 import os
 import time
+import datetime
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
@@ -228,16 +229,8 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     numbers_bought = []
     for i in range(qty):
         if not db.deduct_saldo(user.id, harga_satuan):
-            await update.message.reply_text("❌ Gagal potong saldo, cek saldo lu.")
             break 
-            
-        # --- MULAI TRY-EXCEPT BIAR GA BENGGONG ---
-        try:
-            res, code = await wahub_client.rent_number(target_service['id'])
-        except Exception as e:
-            db.add_saldo(user.id, harga_satuan) # Refund saldo
-            await update.message.reply_text(f"❌ Error Koneksi Provider: {e}\nSaldo dikembalikan.")
-            break
+        res, code = await wahub_client.rent_number(target_service['id'])
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
@@ -247,17 +240,15 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             numbers_bought.append((order_id, token, phone))
         else:
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
-            db.add_saldo(user.id, harga_satuan) # Refund kalau API gagal
+            db.add_saldo(user.id, harga_satuan)
             await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
             break
-        # --- SELESAI TRY-EXCEPT ---
             
     if not numbers_bought:
         ctx.user_data['is_processing'] = False
         return
 
     for idx, (oid, tkn, ph) in enumerate(numbers_bought):
-        # Hitung waktu expired WIB (Waktu Indonesia Barat = UTC+7)
         waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
         waktu_expired = waktu_sekarang_wib + timedelta(minutes=20)
         fmt_expired = waktu_expired.strftime("%H:%M")
@@ -275,9 +266,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             ctx.user_data['ui_msg_id'] = msg_ui.message_id
             ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
         
-        # JADWALKAN TIMEOUT 20 MENIT (1200 detik) VIA JOB QUEUE
         if ctx.job_queue:
-            from otp_handlers import task_timeout_job # import lokal biar aman
             ctx.job_queue.run_once(
                 callback=task_timeout_job,
                 when=1200,
@@ -290,6 +279,8 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                     "price": harga_satuan
                 }
             )
+            
+        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph))
 
     if "kopken" in api_name.lower() and "filter" not in api_name.lower():
         promo_txt = f"💡 Nomor <code>{numbers_bought[0][2]}</code> siap. Mau cek status Kopkennya sekarang?\n"
@@ -300,7 +291,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
-# === FUNGSI JOB TIMEOUT (KALAU 20 MENIT ABIS) ===
 async def task_timeout_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     data = job.data
@@ -310,13 +300,11 @@ async def task_timeout_job(context: ContextTypes.DEFAULT_TYPE):
     price = data["price"]
     
     db_order = db.get_otp_order(oid)
-    # Cek kalau masih waiting dan OTP belum masuk
     if db_order and db_order['status'] == 'waiting':
         cxl_res, cxl_status = await wahub_client.cancel_order(oid)
         if cxl_status == 200:
             db.update_otp_order_status(oid, 'expired')
             db.add_saldo(user_id, price)
-            
             try:
                 await context.bot.edit_message_text(
                     chat_id=user_id,
@@ -328,7 +316,6 @@ async def task_timeout_job(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-# === FUNGSI POLLING OTP ===
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
     if not db_order or db_order['status'] != 'waiting':
@@ -447,11 +434,11 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     
     cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
     
-    try:
-        res, code = await wahub_client.rent_number(target_service['id'])
-    except Exception as e:
-        await query.message.reply_text(f"❌ Error koneksi provider: {e}")
+    if not db.deduct_saldo(user.id, harga):
+        await query.message.reply_text("❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk.")
         return
+
+    res, code = await wahub_client.rent_number(target_service['id'])
     
     if code == 200 and res.get('order_id'):
         new_oid = res['order_id']
@@ -461,7 +448,6 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         db.create_otp_order(user.id, new_oid, new_tkn, new_ph, display_name, harga)
         ctx.user_data['last_order'] = {"order_id": new_oid, "token": new_tkn, "phone": new_ph, "service": display_name, "price": harga}
         
-        # Hitung waktu expired WIB
         waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
         waktu_expired = waktu_sekarang_wib + timedelta(minutes=20)
         fmt_expired = waktu_expired.strftime("%H:%M")
@@ -472,9 +458,7 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
         
-        # JADWALKAN TIMEOUT BARU
         if ctx.job_queue:
-            from otp_handlers import task_timeout_job
             ctx.job_queue.run_once(
                 callback=task_timeout_job,
                 when=1200,
@@ -487,6 +471,8 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
                     "price": harga
                 }
             )
+            
+        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph))
         
         if "kopken" in api_name.lower() and "filter" not in api_name.lower():
             promo_txt = f"💡 Nomor <code>{new_ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
@@ -495,8 +481,9 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
             await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
         
     else:
+        db.add_saldo(user.id, harga)
         err_msg = res.get('message') or res.get('error') or "Unknown error"
-        await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML)
+        await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nSaldo dikembalikan.", parse_mode=ParseMode.HTML)
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = "💰 <b>Deposit Balance</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
@@ -538,24 +525,21 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 display_name = ctx.user_data.get('buy_service')
                 service_id = ctx.user_data.get('buy_id')
                 qty = ctx.user_data.get('buy_qty', 1)
+                harga_satuan = amount // qty
                 
-                try:
-                    res, code = await wahub_client.rent_number(service_id)
-                except Exception as e:
-                    db.add_saldo(chat_id, amount)
-                    await bot.send_message(chat_id, f"❌ Error koneksi setelah bayar: {e}. Balance dikembalikan.")
+                if not db.deduct_saldo(chat_id, amount, f"Beli {display_name}"):
+                    await bot.send_message(chat_id, "❌ Gagal memotong saldo setelah pembayaran QRIS. Sistem sibuk.")
                     return
+
+                res, code = await wahub_client.rent_number(service_id)
                 
                 if code == 200 and res.get('order_id'):
                     oid = res['order_id']
                     tkn = res['token']
                     ph = res['phone']
-                    harga_satuan = amount // qty
                     
                     db.create_otp_order(chat_id, oid, tkn, ph, display_name, harga_satuan)
-                    ctx.bot_data[f"poll_{oid}"] = True
                     
-                    # Hitung waktu expired WIB
                     waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
                     waktu_expired = waktu_sekarang_wib + timedelta(minutes=20)
                     fmt_expired = waktu_expired.strftime("%H:%M")
@@ -563,11 +547,9 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", fmt_expired)
                     
                     msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
-                    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": amount, "msg_id": msg_ui.message_id}
+                    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "msg_id": msg_ui.message_id}
                     
-                    # JADWALKAN TIMEOUT BARU
                     if ctx.job_queue:
-                        from otp_handlers import task_timeout_job
                         ctx.job_queue.run_once(
                             callback=task_timeout_job,
                             when=1200,
@@ -577,17 +559,18 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                                 "msg_id": msg_ui.message_id,
                                 "service_name": display_name,
                                 "phone": ph,
-                                "price": amount
+                                "price": harga_satuan
                             }
                         )
-                    
+                        
+                    asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
                 else:
                     err_msg = res.get('message') or res.get('error') or "Unknown error"
-                    db.add_saldo(chat_id, amount)
+                    db.add_saldo(chat_id, amount, "Refund Gagal Order")
                     await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance Rp {amount:,} dikembalikan.", parse_mode=ParseMode.HTML)
                 
             else:
-                db.add_saldo(chat_id, amount)
+                db.add_saldo(chat_id, amount, f"Topup QRIS Rp {amount:,}")
                 u = db.get_user(chat_id)
                 kb = await get_otp_keyboard()
                 await bot.send_message(chat_id, f"✅ Deposit Berhasil! Balance masuk Rp {amount:,}.\nTotal Balance: Rp {u['saldo']:,}", reply_markup=kb)
