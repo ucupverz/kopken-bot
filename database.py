@@ -5,8 +5,12 @@ import datetime
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None)
+    # Timeout dinaikin ke 60, dan matiin isolation_level bawaan biar WAL jalan
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    # Paksa WAL mode biar read & write ga saling ngunci
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 def init_db():
@@ -72,7 +76,8 @@ def deduct_saldo(user_id, amount, desc="Pembelian"):
             conn.execute("COMMIT")
             return True
         except Exception as e:
-            conn.execute("ROLLBACK")
+            try: conn.execute("ROLLBACK")
+            except: pass
             print(f"[DB] Deduct error: {e}")
             return False
 
@@ -85,7 +90,8 @@ def add_saldo(user_id, amount, desc="Topup / Refund"):
             conn.execute("COMMIT")
             return True
         except Exception as e:
-            conn.execute("ROLLBACK")
+            try: conn.execute("ROLLBACK")
+            except: pass
             print(f"[DB] Add saldo error: {e}")
             return False
 
@@ -161,7 +167,8 @@ def use_voc(code, user_id):
             conn.execute("COMMIT")
             return True, f"Berhasil klaim Rp {voc['quota']:,}", voc['quota']
         except Exception as e:
-            conn.execute("ROLLBACK")
+            try: conn.execute("ROLLBACK")
+            except: pass
             return False, f"Error: {e}", 0
 
 def get_user_transactions(user_id, limit=10):
@@ -169,7 +176,6 @@ def get_user_transactions(user_id, limit=10):
         cursor = conn.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
         return cursor.fetchall()
 
-# === FUNGSI YANG HILANG, DITAMBAHIN ===
 def get_stats():
     with get_conn() as conn:
         total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]

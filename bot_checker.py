@@ -102,9 +102,8 @@ def admin_keyboard():
 # === BACKGROUND REFUNDER (ANTI NYANGKUT) ===
 async def bg_check_stuck_orders(app):
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(120) # Ubah dari 60 ke 120 detik biar jarang tabrakan sama request user
         try:
-            # Cari orderan waiting yang umurnya > 20 menit DAN OTP masih kosong
             with db.get_conn() as conn:
                 cursor = conn.execute("""
                     SELECT * FROM otp_orders 
@@ -134,6 +133,7 @@ async def bg_check_stuck_orders(app):
                         )
                     except Exception:
                         pass
+                    await asyncio.sleep(2) # Kasih jeda 2 detik antar refund biar DB ga ngunci
         except Exception as e:
             print(f"[CRON] Error: {e}")
 
