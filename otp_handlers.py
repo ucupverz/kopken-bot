@@ -11,7 +11,7 @@ import database as db
 import wahub_client
 import dehuyz_automation
 
-# === UBAH NAMA DI SINI ===
+# === NAMA BARU ===
 QUICK_SERVICES = ["Kopken Gacha", "Kopken Asoy", "Shope Gacha", "Shope Asoy"] 
 MARGIN = 700
 BIAYA_CEK_FRESH = 200
@@ -30,7 +30,6 @@ def get_menu_keyboard():
 async def get_otp_keyboard():
     services = await wahub_client.get_services()
     
-    # Buat mapping nama lama (dari API) ke nama baru (tampilan)
     map_names = {
         "Kopken": "Kopken Gacha",
         "Kopken Filter": "Kopken Asoy",
@@ -72,7 +71,6 @@ def build_all_services_inline(services):
             if s['stock'] > 0:
                 harga_jual = s['price'] + MARGIN
                 btn_text = f"{display_name} | {harga_jual:,} (Stok: {s['stock']})"
-                # Kirim id asli ke callback biar ga error pas beli
                 row.append(InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{display_name}"))
             else:
                 row.append(InlineKeyboardButton(f"{display_name} (Habis)", callback_data="otp_none"))
@@ -197,7 +195,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         ctx.user_data['is_processing'] = False
         return
         
-    # Balikin nama asli buat nyocokin sama API
     map_back = {
         "Kopken Gacha": "Kopken",
         "Kopken Asoy": "Kopken Filter",
@@ -488,6 +485,13 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, new_oid, display_name, new_ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph))
+        
+        # --- FIX: MUNCULIN PROMO KOPKEN LAGI SETELAH GANTI NOMOR ---
+        if "kopken" in api_name.lower() and "filter" not in api_name.lower():
+            promo_txt = f"💡 Nomor <code>{new_ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
+            promo_txt += f"*(Kamu punya 2x Free Trial cek gratis!)*"
+            cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{new_ph}")]])
+            await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
         
     else:
         await query.message.reply_text("❌ Gagal mendapatkan nomor baru dari provider. Balance Anda aman.")
