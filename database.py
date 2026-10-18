@@ -145,12 +145,14 @@ def init_db():
         """)
         # Migration: add saldo column if upgrading from old DB
         try:
-            c.execute("ALTER TABLE users ADD COLUMN saldo INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
-        conn.commit()
-    print(f"✅ Database initialized at: {DB_PATH}")
-
+            conn.execute("ALTER TABLE users ADD COLUMN trial_kopken INTEGER DEFAULT 2")
+            print("✅ Kolom trial_kopken berhasil ditambahkan.")
+        except Exception as e:
+            # Kalau errornya karena kolom udah ada, abaikan aja
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                print(f"⚠️ Info alter table: {e}")
 
 @contextmanager
 def get_conn():
@@ -775,3 +777,18 @@ def create_automated_deposit(user_id, amount):
         """, (user_id, amount, int(time.time())))
         conn.commit()
         return c.lastrowid
+
+def get_trial_kopken(user_id):
+    """Ambil sisa trial kopken user"""
+    with get_conn() as conn:
+        # Pastiin lu import sqlite3.Row di atas biar bisa akses pakai nama kolom
+        cursor = conn.execute("SELECT trial_kopken FROM users WHERE user_id = ?", (user_id,))
+        res = cursor.fetchone()
+        if res and res["trial_kopken"] is not None:
+            return res["trial_kopken"]
+        return 2 # Default kalau user baru
+
+def set_trial_kopken(user_id, sisa):
+    """Set sisa trial kopken user"""
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET trial_kopken = ? WHERE user_id = ?", (sisa, user_id))
