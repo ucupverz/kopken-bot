@@ -1,14 +1,11 @@
 import sqlite3
 import os
-import datetime
 
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
 def get_conn():
-    # Timeout dinaikin ke 60, dan matiin isolation_level bawaan biar WAL jalan
     conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    # Paksa WAL mode biar read & write ga saling ngunci
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
@@ -64,34 +61,30 @@ def init_db():
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
+            # PAKSA CAST KE INTEGER (biar kalau format string ga nge-bug)
+            cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as s FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
-            if not row or row['saldo'] < amount:
-                conn.execute("ROLLBACK")
+            
+            # Debugging print ke terminal Railway
+            print(f"[DB] Deduct user {user_id}, saldo saat ini: {row['s'] if row else 'NOT FOUND'}, butuh: {amount}")
+            
+            if not row or row['s'] < amount:
                 return False
             
             conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
-            conn.execute("COMMIT")
             return True
         except Exception as e:
-            try: conn.execute("ROLLBACK")
-            except: pass
             print(f"[DB] Deduct error: {e}")
             return False
 
 def add_saldo(user_id, amount, desc="Topup / Refund"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, amount, desc))
-            conn.execute("COMMIT")
             return True
         except Exception as e:
-            try: conn.execute("ROLLBACK")
-            except: pass
             print(f"[DB] Add saldo error: {e}")
             return False
 
@@ -154,21 +147,16 @@ def get_voc(code):
 def use_voc(code, user_id):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("SELECT * FROM voc_codes WHERE code = ? AND active = 1", (code,))
             voc = cursor.fetchone()
             if not voc:
-                conn.execute("ROLLBACK")
                 return False, "Kode tidak valid atau sudah terpakai.", 0
             
             conn.execute("UPDATE voc_codes SET active = 0, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?", (user_id, code))
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (voc['quota'], user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', 'Redeem VOC')", (user_id, voc['quota']))
-            conn.execute("COMMIT")
             return True, f"Berhasil klaim Rp {voc['quota']:,}", voc['quota']
         except Exception as e:
-            try: conn.execute("ROLLBACK")
-            except: pass
             return False, f"Error: {e}", 0
 
 def get_user_transactions(user_id, limit=10):
