@@ -230,33 +230,37 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     numbers_bought = []
     for i in range(qty):
+        # 1. POTONG SALDO DULU (ANTI RUGI)
+        if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
+            await update.message.reply_text(f"❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk (Database Locked).")
+            break 
+            
+        # 2. TEMBAK API DEHUYZ
         res, code = await wahub_client.rent_number(target_service['id'])
+        
+        # 3. KALAU GAGAL, REFUND LALU STOP
         if code == 408:
-            await update.message.reply_text(f"❌ {res.get('error', 'Provider timeout')}")
-            ctx.user_data['is_processing'] = False
-            ctx.user_data['buy_state'] = None
-            return
+            db.add_saldo(user.id, harga_satuan, f"Refund Gagal Order {display_name}")
+            await update.message.reply_text(f"❌ {res.get('error', 'Provider timeout')}. Saldo Rp {harga_satuan:,} dikembalikan.")
+            break
         if code == 500:
-            await update.message.reply_text(f"❌ Gagal koneksi ke Provider: {res.get('error', 'Unknown')}")
-            ctx.user_data['is_processing'] = False
-            ctx.user_data['buy_state'] = None
-            return
+            db.add_saldo(user.id, harga_satuan, f"Refund Gagal Order {display_name}")
+            await update.message.reply_text(f"❌ Gagal koneksi ke Provider. Saldo Rp {harga_satuan:,} dikembalikan.")
+            break
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
             token = res.get('token')
             phone = res.get('phone')
             
-            if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
-                await wahub_client.cancel_order(order_id)
-                await update.message.reply_text(f"❌ Gagal potong saldo untuk nomor ke-{i+1}. Sisa saldo tidak cukup.")
-                break 
-                
+            # 4. SIMPAN KE DB
             db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan)
             numbers_bought.append((order_id, token, phone))
         else:
+            # KALAU API NGASIH ERROR LAIN, REFUND
+            db.add_saldo(user.id, harga_satuan, f"Refund Gagal Order {display_name}")
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
-            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nSaldo Rp {harga_satuan:,} dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
             break
             
     if not numbers_bought:
@@ -476,9 +480,17 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     await query.message.reply_text("⏳ Membatalkan nomor lama & memproses nomor baru...")
     
     cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
+    
+    # 1. POTONG SALDO DULU
+    if not db.deduct_saldo(user.id, harga, f"Beli {display_name}"):
+        await query.message.reply_text(f"❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk (Database Locked).")
+        return
+
+    # 2. TEMBAK API
     res, code = await wahub_client.rent_number(target_service['id'])
     if code == 408:
-        await query.message.reply_text(f"❌ {res.get('error', 'Provider timeout')} saat ganti nomor. Silakan coba lagi.")
+        db.add_saldo(user.id, harga, f"Refund Gagal Order {display_name}")
+        await query.message.reply_text(f"❌ {res.get('error', 'Provider timeout')} saat ganti nomor. Saldo dikembalikan.")
         return
     
     if code == 200 and res.get('order_id'):
@@ -505,8 +517,9 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
             await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
         
     else:
+        db.add_saldo(user.id, harga, f"Refund Gagal Order {display_name}")
         err_msg = res.get('message') or res.get('error') or "Unknown error"
-        await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML)
+        await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nSaldo dikembalikan.", parse_mode=ParseMode.HTML)
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = "💰 <b>Deposit Balance</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
@@ -548,8 +561,16 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 display_name = ctx.user_data.get('buy_service')
                 service_id = ctx.user_data.get('buy_id')
                 qty = ctx.user_data.get('buy_qty', 1)
+                harga_satuan = amount // qty
                 
+                # 1. POTONG SALDO DULU
+                if not db.deduct_saldo(chat_id, amount, f"Beli {display_name}"):
+                    await bot.send_message(chat_id, "❌ Gagal memotong saldo setelah pembayaran QRIS. Sistem sibuk.")
+                    return
+
+                # 2. TEMBAK API
                 res, code = await wahub_client.rent_number(service_id)
+                
                 if code == 408:
                     db.add_saldo(chat_id, amount, "Refund Gagal Order Timeout")
                     await bot.send_message(chat_id, "❌ Provider Timeout setelah bayar. Balance dikembalikan.")
@@ -559,15 +580,13 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     oid = res['order_id']
                     tkn = res['token']
                     ph = res['phone']
-                    harga_satuan = amount // qty
                     
-                    db.deduct_saldo(chat_id, amount, f"Beli {display_name}")
                     db.create_otp_order(chat_id, oid, tkn, ph, display_name, harga_satuan)
                     
                     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
                     
                     msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
-                    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": amount, "msg_id": msg_ui.message_id}
+                    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "msg_id": msg_ui.message_id}
                     
                     asyncio.create_task(run_timer(bot, chat_id, msg_ui.message_id, oid, display_name, ph, 1200))
                     asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
