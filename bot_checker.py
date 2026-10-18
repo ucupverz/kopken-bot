@@ -96,6 +96,7 @@ def admin_keyboard():
         ["📱 WhatsApp OTP", "💳 Topup Balance"],
         ["🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "🔧 Admin Panel"],
+        ["🆕 User Baru", "📥 Topup Log"],
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
@@ -333,6 +334,30 @@ async def handle_message(update, ctx):
         await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
+        return
+
+    if text == "📥 Topup Log" and is_admin(user.id):
+        topups = db.get_recent_topups(10)
+        if not topups:
+            await update.message.reply_text("Belum ada topup.")
+            return
+        txt = "📥 *10 Topup Terakhir*\n\n"
+        import datetime as dtmod
+        for t in topups:
+            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+            txt += f"🟢 Rp {t['amount']:,} | User: `{t['user_id']}` | {jam}\n"
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if text == "🆕 User Baru" and is_admin(user.id):
+        users = db.get_recent_users(10)
+        txt = "🆕 *10 User Terbaru*\n\n"
+        import datetime as dtmod
+        for u in users:
+            jam = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
+            uname = f"@{u['username']}" if u['username'] else "(no uname)"
+            txt += f"👤 `{u['user_id']}` | {u['first_name']} {uname} | {jam}\n"
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
         return
 
     text_upper = text.upper()

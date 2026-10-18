@@ -249,3 +249,13 @@ def sfood_add_log(order_id, status_code, status_text):
             INSERT INTO sfood_logs (order_id, status_code, status_text) 
             VALUES (?, ?, ?)
         """, (order_id, status_code, status_text))
+
+def get_recent_topups(limit=10):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM transactions WHERE type = 'IN' AND description LIKE 'Topup%' ORDER BY id DESC LIMIT ?", (limit,))
+        return cursor.fetchall()
+
+def get_recent_users(limit=10):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ?", (limit,))
+        return cursor.fetchall()
