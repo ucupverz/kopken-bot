@@ -255,7 +255,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
     msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
     
-    # Simpan msg_id di sini
     ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
     ctx.user_data['ui_msg_id'] = msg_ui.message_id
     
@@ -353,6 +352,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             pass
         return
         
+    # Cek apakah status di DB masih waiting (Anti Race-Condition)
     db_order = db.get_otp_order(order_id)
     if db_order and db_order['status'] == 'waiting':
         cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
@@ -397,6 +397,12 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             await query.delete_message()
         except Exception:
             pass
+            
+        # Cek apakah status di DB masih waiting (Biar ga double refund)
+        db_order = db.get_otp_order(last_order['order_id'])
+        if not db_order or db_order['status'] != 'waiting':
+            await query.message.reply_text("❌ Pesanan sudah selesai atau dibatalkan sebelumnya.")
+            return
             
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         
