@@ -66,7 +66,14 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        print("✅ Database initialized.")
+        
+        # AUTO-MIGRATE: Nambahin kolom 'status' kalau tabel sfood_orders lu dari versi lama
+        try:
+            conn.execute("ALTER TABLE sfood_orders ADD COLUMN status TEXT DEFAULT 'active'")
+        except sqlite3.OperationalError:
+            pass # Kalau kolomnya udah ada, abaikan error
+            
+        print("✅ Database initialized & migrated.")
 
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
@@ -206,7 +213,7 @@ def get_voc_detail(code):
             user = conn.execute("SELECT * FROM users WHERE user_id = ?", (voc['used_by'],)).fetchone()
         return voc, user
 
-# === FUNGSI SFOOD YANG SEMPET HILANG ===
+# === FUNGSI SFOOD ===
 def sfood_get_active_orders():
     with get_conn() as conn:
         cursor = conn.execute("SELECT * FROM sfood_orders WHERE status = 'active'")
