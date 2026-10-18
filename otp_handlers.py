@@ -103,15 +103,15 @@ async def boostly_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
-# === FUNGSI UI BARU DENGAN JAM WIB ===
-def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-", is_bulk=False):
-    # Waktu berlaku
+def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     now_wib = datetime.utcnow() + timedelta(hours=7)
     expire_wib = now_wib + timedelta(seconds=time_left)
     jam_expired = expire_wib.strftime("%H:%M:%S")
 
     if status == "Menunggu OTP":
-        status_line = f"⏳ <b>Menunggu OTP</b>\nBerlaku sampai: <b>{jam_expired} WIB</b>"
+        menit = time_left // 60
+        detik = time_left % 60
+        status_line = f"⏳ <b>Menunggu OTP</b>\nBerlaku sampai: <b>{jam_expired} WIB</b>\n<code>[{menit:02d}:{detik:02d}]</code>"
         otp_line = ""
     elif status == "Selesai":
         status_line = f"✅ <b>Pesanan Selesai</b>"
@@ -267,9 +267,11 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         for idx, (o, t, p) in enumerate(numbers_bought, 1):
             info_txt += f"{idx}. <code>{p}</code>\n"
             if idx > 1:
+                # JEDA 3 DETIK SEBELUM KIRIM UI KEDUA (Anti Rate Limit)
+                await asyncio.sleep(3)
                 sub_msg = await ctx.bot.send_message(
                     chat_id=user.id, 
-                    text=build_order_ui(o, display_name, p, "Menunggu OTP", 1200, is_bulk=True), 
+                    text=build_order_ui(o, display_name, p, "Menunggu OTP", 1200), 
                     parse_mode=ParseMode.HTML, 
                     reply_markup=get_order_inline_keyboard("Menunggu OTP")
                 )
@@ -290,7 +292,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     while True:
-        await asyncio.sleep(5) 
+        await asyncio.sleep(5) # Ini yang bikin update tiap 5 detik
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
@@ -398,15 +400,11 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
         
     if action == "batal":
+        # HAPUS CEK DB YANG BIKIN ERROR, LANGSUNG BATALKAN!
         try:
             await query.delete_message()
         except Exception:
             pass
-            
-        db_order = db.get_otp_order(last_order['order_id'])
-        if not db_order or db_order['status'] != 'waiting':
-            await query.message.reply_text("❌ Pesanan sudah selesai atau dibatalkan sebelumnya.")
-            return
             
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         

@@ -51,7 +51,7 @@ def init_db():
             )
         """)
         
-        # MUTASI SALDO (HISTORY)
+        # MUTASI SALDO
         conn.execute("""
             CREATE TABLE IF NOT EXISTS saldo_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,12 +65,11 @@ def init_db():
         """)
         print("✅ Database initialized.")
 
-# === FUNGSI SALDO (ANTI BUG) ===
+# === FUNGSI SALDO (ANTI RACE-CONDITION) ===
 def add_saldo(user_id, amount, type="system", description="Saldo Masuk"):
     with get_conn() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            # Cek user
             cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             if not row:
@@ -87,7 +86,6 @@ def add_saldo(user_id, amount, type="system", description="Saldo Masuk"):
             return True
         except Exception as e:
             conn.execute("ROLLBACK")
-            print(f"[DB] Add saldo error: {e}")
             return False
 
 def deduct_saldo(user_id, amount, description="Pembelian"):
@@ -110,10 +108,9 @@ def deduct_saldo(user_id, amount, description="Pembelian"):
             return True
         except Exception as e:
             conn.execute("ROLLBACK")
-            print(f"[DB] Deduct error: {e}")
             return False
 
-def get_saldo_history(user_id, limit=10):
+def get_saldo_history(user_id, limit=5):
     with get_conn() as conn:
         cursor = conn.execute(
             "SELECT * FROM saldo_history WHERE user_id = ? ORDER BY id DESC LIMIT ?", 
@@ -190,7 +187,6 @@ def use_voc(code, user_id):
             
             conn.execute("UPDATE voc_codes SET active = 0, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?", (user_id, code))
             
-            # Panggil add_saldo logic di dalam transaksi yang sama
             cursor2 = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
             row2 = cursor2.fetchone()
             new_saldo = row2['saldo'] + voc['quota']

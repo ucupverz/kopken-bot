@@ -176,7 +176,7 @@ async def cmd_balance(update, ctx):
         u = db.get_user(user.id)
     
     saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    history = db.get_saldo_history(user.id, limit=5) # Ambil 5 transaksi terakhir
+    history = db.get_saldo_history(user.id, limit=5)
     
     text = f"💰 *Balance Kamu*\n\n"
     text += f"Saldo saat ini: *Rp {saldo:,}*\n\n"
@@ -186,8 +186,13 @@ async def cmd_balance(update, ctx):
         text += "_Belum ada transaksi._"
     else:
         for h in history:
-            # Format jam
-            tgl = datetime.fromisoformat(h['created_at']).strftime("%H:%M")
+            # Format jam WIB
+            try:
+                dt = datetime.fromisoformat(h['created_at']) + timedelta(hours=7)
+                tgl = dt.strftime("%H:%M")
+            except:
+                tgl = "-"
+                
             if h['amount'] > 0:
                 text += f"🟢 +Rp {h['amount']:,} | {h['description']} ({tgl}) -> Sisa: Rp {h['final_saldo']:,}\n"
             else:
