@@ -81,10 +81,16 @@ def init_db():
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
+            # PAKSA CAST KE INTEGER (biar kalau format string ga nge-bug)
             cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as s FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
+            
+            # Ini bakal nge-print di log Railway lu, biar lu tau saldo asli yang dibaca bot
+            print(f"[DB] Deduct user {user_id}, saldo saat ini: {row['s'] if row else 'NOT FOUND'}, butuh: {amount}")
+            
             if not row or row['s'] < amount:
                 return False
+            
             conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
             return True
