@@ -228,8 +228,16 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     numbers_bought = []
     for i in range(qty):
         if not db.deduct_saldo(user.id, harga_satuan):
+            await update.message.reply_text("❌ Gagal potong saldo, cek saldo lu.")
             break 
-        res, code = await wahub_client.rent_number(target_service['id'])
+            
+        # --- MULAI TRY-EXCEPT BIAR GA BENGGONG ---
+        try:
+            res, code = await wahub_client.rent_number(target_service['id'])
+        except Exception as e:
+            db.add_saldo(user.id, harga_satuan) # Refund saldo
+            await update.message.reply_text(f"❌ Error Koneksi Provider: {e}\nSaldo dikembalikan.")
+            break
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
@@ -239,15 +247,15 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             numbers_bought.append((order_id, token, phone))
         else:
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
-            db.add_saldo(user.id, harga_satuan)
+            db.add_saldo(user.id, harga_satuan) # Refund kalau API gagal
             await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
             break
+        # --- SELESAI TRY-EXCEPT ---
             
     if not numbers_bought:
         ctx.user_data['is_processing'] = False
         return
 
-    # Looping buat nampilin pesanan di chat
     for idx, (oid, tkn, ph) in enumerate(numbers_bought):
         # Hitung waktu expired WIB (Waktu Indonesia Barat = UTC+7)
         waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
@@ -269,6 +277,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         
         # JADWALKAN TIMEOUT 20 MENIT (1200 detik) VIA JOB QUEUE
         if ctx.job_queue:
+            from otp_handlers import task_timeout_job # import lokal biar aman
             ctx.job_queue.run_once(
                 callback=task_timeout_job,
                 when=1200,
@@ -437,7 +446,12 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     await query.message.reply_text("⏳ Membatalkan nomor lama & memproses nomor baru...")
     
     cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
-    res, code = await wahub_client.rent_number(target_service['id'])
+    
+    try:
+        res, code = await wahub_client.rent_number(target_service['id'])
+    except Exception as e:
+        await query.message.reply_text(f"❌ Error koneksi provider: {e}")
+        return
     
     if code == 200 and res.get('order_id'):
         new_oid = res['order_id']
@@ -460,6 +474,7 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         
         # JADWALKAN TIMEOUT BARU
         if ctx.job_queue:
+            from otp_handlers import task_timeout_job
             ctx.job_queue.run_once(
                 callback=task_timeout_job,
                 when=1200,
@@ -524,7 +539,12 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 service_id = ctx.user_data.get('buy_id')
                 qty = ctx.user_data.get('buy_qty', 1)
                 
-                res, code = await wahub_client.rent_number(service_id)
+                try:
+                    res, code = await wahub_client.rent_number(service_id)
+                except Exception as e:
+                    db.add_saldo(chat_id, amount)
+                    await bot.send_message(chat_id, f"❌ Error koneksi setelah bayar: {e}. Balance dikembalikan.")
+                    return
                 
                 if code == 200 and res.get('order_id'):
                     oid = res['order_id']
@@ -547,6 +567,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     
                     # JADWALKAN TIMEOUT BARU
                     if ctx.job_queue:
+                        from otp_handlers import task_timeout_job
                         ctx.job_queue.run_once(
                             callback=task_timeout_job,
                             when=1200,
