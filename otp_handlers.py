@@ -258,7 +258,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         return 
 
     start_time = time.time()
-    while time.time() - start_time < 1200:
+    while time.time() - start_time < 1200: # Loop maksimal 20 menit
         db_order = db.get_otp_order(order_id)
         if not db_order or db_order['status'] != 'waiting':
             return 
@@ -284,6 +284,20 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             
         await asyncio.sleep(15)
         
+    # Kalau 20 menit abis, cek SEKALI LAGI barangkali telat masuk
+    res, status = await wahub_client.check_otp(token, timeout=15)
+    if status == 200 and res.get('state') == 'success':
+        otp = res.get('otp')
+        db.update_otp_order_status(order_id, 'success', otp)
+        await wahub_client.mark_done(order_id)
+        ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
+        try:
+            await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard())
+        except Exception:
+            pass
+        return
+        
+    # Kalau 20 menit beneran abis dan tetep ga ada OTP, baru CANCEL
     db_order = db.get_otp_order(order_id)
     if db_order and db_order['status'] == 'waiting':
         cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
@@ -537,9 +551,8 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
     user = update.effective_user
     last_order = ctx.user_data.get('last_order')
     
-    # 1. Cancel order lama kalau ada
     if last_order:
-        await query.edit_message_text("⏳ Membatalkan pesanan sebelumnya...") # <-- Ubah edit text sini
+        await query.edit_message_text("⏳ Membatalkan pesanan sebelumnya...")
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         if code == 200:
             refund = last_order.get('price', 0)
@@ -550,7 +563,6 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
         else:
             await query.message.reply_text("⚠️ Gagal membatalkan pesanan lama, tapi lanjut proses beli Kopken Filter.")
 
-    # 2. Lanjut ke proses beli Kopken Filter
     data_parts = query.data.split("_")
     service_id = int(data_parts[2])
     harga_jual = int(data_parts[3])
@@ -561,7 +573,6 @@ async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTyp
     ctx.user_data['buy_total'] = harga_jual
     ctx.user_data['buy_id'] = service_id
     
-    # Bot nanya qty beli ke user
     await query.message.reply_text(
         f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
         parse_mode=ParseMode.HTML
