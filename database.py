@@ -1,17 +1,17 @@
 import sqlite3
 import os
-import datetime
 
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None) 
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 def init_db():
     with get_conn() as conn:
-        # Users
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -22,8 +22,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # OTP Orders
         conn.execute("""
             CREATE TABLE IF NOT EXISTS otp_orders (
                 order_id TEXT PRIMARY KEY,
@@ -37,8 +35,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # VOC
         conn.execute("""
             CREATE TABLE IF NOT EXISTS voc_codes (
                 code TEXT PRIMARY KEY,
@@ -50,73 +46,55 @@ def init_db():
                 used_at TIMESTAMP
             )
         """)
-        
-        # MUTASI SALDO
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS saldo_history (
+            CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 amount INTEGER,
                 type TEXT,
                 description TEXT,
-                final_saldo INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        print("✅ Database initialized.")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sfood_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                label TEXT,
+                link TEXT,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        try:
+            conn.execute("ALTER TABLE sfood_orders ADD COLUMN status TEXT DEFAULT 'active'")
+        except sqlite3.OperationalError:
+            pass
+        print("✅ Database initialized & migrated.")
 
-# === FUNGSI SALDO (ANTI RACE-CONDITION) ===
-def add_saldo(user_id, amount, type="system", description="Saldo Masuk"):
+def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
+            cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as s FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
-            if not row:
-                conn.execute("ROLLBACK")
+            if not row or row['s'] < amount:
                 return False
-
-            new_saldo = row['saldo'] + amount
-            conn.execute("UPDATE users SET saldo = ? WHERE user_id = ?", (new_saldo, user_id))
-            conn.execute(
-                "INSERT INTO saldo_history (user_id, amount, type, description, final_saldo) VALUES (?, ?, ?, ?, ?)",
-                (user_id, amount, type, description, new_saldo)
-            )
-            conn.execute("COMMIT")
+            conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
             return True
         except Exception as e:
-            conn.execute("ROLLBACK")
+            print(f"[DB] Deduct error: {e}")
             return False
 
-def deduct_saldo(user_id, amount, description="Pembelian"):
+def add_saldo(user_id, amount, desc="Topup / Refund"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-            if not row or row['saldo'] < amount:
-                conn.execute("ROLLBACK")
-                return False
-            
-            new_saldo = row['saldo'] - amount
-            conn.execute("UPDATE users SET saldo = ? WHERE user_id = ?", (new_saldo, user_id))
-            conn.execute(
-                "INSERT INTO saldo_history (user_id, amount, type, description, final_saldo) VALUES (?, ?, ?, ?, ?)",
-                (user_id, -amount, "deduct", description, new_saldo)
-            )
-            conn.execute("COMMIT")
+            conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, amount, desc))
             return True
         except Exception as e:
-            conn.execute("ROLLBACK")
+            print(f"[DB] Add saldo error: {e}")
             return False
-
-def get_saldo_history(user_id, limit=5):
-    with get_conn() as conn:
-        cursor = conn.execute(
-            "SELECT * FROM saldo_history WHERE user_id = ? ORDER BY id DESC LIMIT ?", 
-            (user_id, limit)
-        )
-        return cursor.fetchall()
 
 def get_user(user_id):
     with get_conn() as conn:
@@ -161,7 +139,6 @@ def get_otp_order(order_id):
         cursor = conn.execute("SELECT * FROM otp_orders WHERE order_id = ?", (order_id,))
         return cursor.fetchone()
 
-# FUNGSI VOC
 def create_voc(code, quota, created_by):
     with get_conn() as conn:
         try:
@@ -178,27 +155,69 @@ def get_voc(code):
 def use_voc(code, user_id):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("SELECT * FROM voc_codes WHERE code = ? AND active = 1", (code,))
             voc = cursor.fetchone()
             if not voc:
-                conn.execute("ROLLBACK")
                 return False, "Kode tidak valid atau sudah terpakai.", 0
-            
             conn.execute("UPDATE voc_codes SET active = 0, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?", (user_id, code))
-            
-            cursor2 = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
-            row2 = cursor2.fetchone()
-            new_saldo = row2['saldo'] + voc['quota']
-            
-            conn.execute("UPDATE users SET saldo = ? WHERE user_id = ?", (new_saldo, user_id))
-            conn.execute(
-                "INSERT INTO saldo_history (user_id, amount, type, description, final_saldo) VALUES (?, ?, ?, ?, ?)",
-                (user_id, voc['quota'], "voc", f"Klaim VOC {code}", new_saldo)
-            )
-            
-            conn.execute("COMMIT")
+            conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (voc['quota'], user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', 'Redeem VOC')", (user_id, voc['quota']))
             return True, f"Berhasil klaim Rp {voc['quota']:,}", voc['quota']
         except Exception as e:
-            conn.execute("ROLLBACK")
             return False, f"Error: {e}", 0
+
+def get_user_transactions(user_id, limit=10):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
+        return cursor.fetchall()
+
+def get_stats():
+    with get_conn() as conn:
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_cek = conn.execute("SELECT COUNT(*) FROM transactions WHERE description LIKE 'Cek Kopken%'").fetchone()[0]
+        return {"total_users": total_users, "total_cek": total_cek}
+
+def list_voc_codes(limit=20):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM voc_codes ORDER BY created_at DESC LIMIT ?", (limit,))
+        return cursor.fetchall()
+
+def revoke_voc(code):
+    with get_conn() as conn:
+        conn.execute("UPDATE voc_codes SET active = 0 WHERE code = ?", (code,))
+
+def list_all_users(limit=50):
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ?", (limit,))
+        return cursor.fetchall()
+
+def get_user_detail(user_id):
+    with get_conn() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        vocs = conn.execute("SELECT * FROM voc_codes WHERE used_by = ?", (user_id,)).fetchall()
+        return user, vocs
+
+def get_voc_detail(code):
+    with get_conn() as conn:
+        voc = conn.execute("SELECT * FROM voc_codes WHERE code = ?", (code,)).fetchone()
+        user = None
+        if voc and voc['used_by']:
+            user = conn.execute("SELECT * FROM users WHERE user_id = ?", (voc['used_by'],)).fetchone()
+        return voc, user
+
+def sfood_get_active_orders():
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM sfood_orders WHERE status = 'active'")
+        return cursor.fetchall()
+
+# === FUNGSI BARU BUAT ADMIN LIHAT TOPUP ===
+def get_recent_topups(limit=20):
+    with get_conn() as conn:
+        cursor = conn.execute("""
+            SELECT t.*, u.first_name, u.username 
+            FROM transactions t 
+            JOIN users u ON t.user_id = u.user_id 
+            WHERE t.description LIKE '%Topup%' OR t.description LIKE '%QRIS%' 
+            ORDER BY t.id DESC LIMIT ?
+        """, (limit,))
+        return cursor.fetchall()

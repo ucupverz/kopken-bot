@@ -99,10 +99,9 @@ def admin_keyboard():
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
-# === BACKGROUND REFUNDER (ANTI NYANGKUT) ===
 async def bg_check_stuck_orders(app):
     while True:
-        await asyncio.sleep(120) # Ubah dari 60 ke 120 detik biar jarang tabrakan sama request user
+        await asyncio.sleep(120) 
         try:
             with db.get_conn() as conn:
                 cursor = conn.execute("""
@@ -133,7 +132,7 @@ async def bg_check_stuck_orders(app):
                         )
                     except Exception:
                         pass
-                    await asyncio.sleep(2) # Kasih jeda 2 detik antar refund biar DB ga ngunci
+                    await asyncio.sleep(2)
         except Exception as e:
             print(f"[CRON] Error: {e}")
 
@@ -174,29 +173,23 @@ async def cmd_balance(update, ctx):
     if not u:
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
+    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     
-    saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
-    history = db.get_saldo_history(user.id, limit=5)
+    trxs = db.get_user_transactions(user.id, limit=10)
     
-    text = f"💰 *Balance Kamu*\n\n"
-    text += f"Saldo saat ini: *Rp {saldo:,}*\n\n"
-    text += f"📜 *5 Transaksi Terakhir:*\n"
+    text = f"💰 *Balance Kamu*\n\nSaldo saat ini: *Rp {balance:,}*\n\n"
+    text += "🧾 *10 Transaksi Terakhir:*\n"
     
-    if not history:
-        text += "_Belum ada transaksi._"
+    if not trxs:
+        text += "_(Belum ada transaksi)_"
     else:
-        for h in history:
-            # Format jam WIB
-            try:
-                dt = datetime.fromisoformat(h['created_at']) + timedelta(hours=7)
-                tgl = dt.strftime("%H:%M")
-            except:
-                tgl = "-"
-                
-            if h['amount'] > 0:
-                text += f"🟢 +Rp {h['amount']:,} | {h['description']} ({tgl}) -> Sisa: Rp {h['final_saldo']:,}\n"
+        import datetime as dtmod
+        for t in trxs:
+            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+            if t['type'] == 'IN':
+                text += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
             else:
-                text += f"🔴 -Rp {abs(h['amount']):,} | {h['description']} ({tgl}) -> Sisa: Rp {h['final_saldo']:,}\n"
+                text += f"🔴 -Rp {t['amount']:,} | {t['description']} ({jam})\n"
                 
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -255,7 +248,7 @@ async def handle_message(update, ctx):
                 if balance < BIAYA_CEK_FRESH:
                     await msg.edit_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
                     return
-                db.deduct_saldo(user.id, BIAYA_CEK_FRESH, f"Cek Kopken {phone}")
+                db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
                 reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
                 
         elif status == "registered":
@@ -356,7 +349,32 @@ async def handle_message(update, ctx):
 async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n\n*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
+    text = (
+        f"🔧 *Admin Panel*\n\n"
+        f"👥 Users: {s['total_users']}\n"
+        f"☕ Total cek: {s['total_cek']}\n\n"
+        f"*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n"
+        f"*Cek Topup Terakhir:* `/topups`\n\n"
+        f"*ShopeeFood Admin:*\n"
+        f"`/sfood_users` — List user\n"
+        f"`/sfood_leaderboard` — Leaderboard\n"
+        f"`/sfood_userinfo <id>` — Detail user\n\n"
+        f"*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_topups(update, ctx):
+    if not is_admin(update.effective_user.id): return
+    topups = db.get_recent_topups(15)
+    if not topups:
+        await update.message.reply_text("Belum ada topup terbaru.")
+        return
+    import datetime as dtmod
+    text = "💰 *15 Topup Terakhir*\n\n"
+    for t in topups:
+        jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+        uname = f"@{t['username']}" if t['username'] else t['first_name']
+        text += f"🟢 +Rp {t['amount']:,} | {uname} | {jam}\n"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_genvoc(update, ctx):
@@ -412,7 +430,7 @@ async def cmd_addsaldo(update, ctx):
     try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
     except ValueError: return
     if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
-    db.add_saldo(uid, amt, f"Admin Add Saldo")
+    db.add_saldo(uid, amt)
     new_s = db.get_user(uid)["saldo"]
     await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}", parse_mode=ParseMode.MARKDOWN)
 
@@ -481,7 +499,6 @@ async def lifespan(app: FastAPI):
     print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
     asyncio.create_task(tracker_worker(bot_app.bot))
     print("[SFOOD] Tracker worker started")
-    # JALANIN BACKGROUND REFUNDER
     asyncio.create_task(bg_check_stuck_orders(bot_app))
     print("[CRON] Background refunder started")
     yield
@@ -562,6 +579,7 @@ def main():
     bot_app.add_handler(CommandHandler("users", cmd_users))
     bot_app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
+    bot_app.add_handler(CommandHandler("topups", cmd_topups))
     
     bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
     bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act_"))
