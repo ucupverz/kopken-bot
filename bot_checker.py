@@ -81,7 +81,6 @@ def sanitize_voc_input(text):
     if len(t) < 3 or len(t) > 50: return None
     return t
 
-# === KEYBOARD BARU (TOPUP MUNCUL LAGI) ===
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
@@ -138,7 +137,6 @@ async def cmd_balance(update, ctx):
         u = db.get_user(user.id)
     balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     
-    # Ambil history
     trxs = db.get_user_transactions(user.id, limit=10)
     
     text = f"💰 *Balance Kamu*\n\nSaldo saat ini: *Rp {balance:,}*\n\n"
@@ -147,9 +145,8 @@ async def cmd_balance(update, ctx):
     if not trxs:
         text += "_(Belum ada transaksi)_"
     else:
+        import datetime as dtmod
         for t in trxs:
-            # Format jam
-            import datetime as dtmod
             jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
             if t['type'] == 'IN':
                 text += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
@@ -213,7 +210,7 @@ async def handle_message(update, ctx):
                 if balance < BIAYA_CEK_FRESH:
                     await msg.edit_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
                     return
-                db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
+                db.deduct_saldo(user.id, BIAYA_CEK_FRESH, f"Cek Kopken {phone}")
                 reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
                 
         elif status == "registered":
@@ -273,7 +270,6 @@ async def handle_message(update, ctx):
             await update.message.reply_text("❌ Tidak ada pesanan aktif.")
             return
             
-        # Cek status dari DB
         order_db = db.get_otp_order(last_order['order_id'])
         if order_db:
             if order_db['status'] == 'success':
@@ -371,7 +367,7 @@ async def cmd_addsaldo(update, ctx):
     try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
     except ValueError: return
     if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
-    db.add_saldo(uid, amt)
+    db.add_saldo(uid, amt, f"Admin Add Saldo")
     new_s = db.get_user(uid)["saldo"]
     await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}", parse_mode=ParseMode.MARKDOWN)
 

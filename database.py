@@ -5,6 +5,7 @@ import datetime
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
 def get_conn():
+    # isolation_level=None biar support BEGIN IMMEDIATE (Anti race-condition)
     conn = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None)
     conn.row_factory = sqlite3.Row
     return conn
@@ -45,7 +46,7 @@ def init_db():
                 used_at TIMESTAMP
             )
         """)
-        # === TABEL BARU BUAT HISTORY BALANCE ===
+        # Tabel Transaksi
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,7 +166,6 @@ def use_voc(code, user_id):
             conn.execute("ROLLBACK")
             return False, f"Error: {e}", 0
 
-# === FUNGSI HISTORY BALANCE ===
 def get_user_transactions(user_id, limit=10):
     with get_conn() as conn:
         cursor = conn.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))

@@ -229,7 +229,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     numbers_bought = []
     for i in range(qty):
-        # Catet history mutasi saldo
         if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
             break 
         res, code = await wahub_client.rent_number(target_service['id'])
@@ -358,7 +357,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
         if cxl_status == 200:
             db.update_otp_order_status(order_id, 'expired')
-            # Catet history refund
             db.add_saldo(user_id, db_order['price'], f"Refund Waktu Habis {db_order['service_name']}")
             
             ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {db_order['price']:,} dikembalikan."
