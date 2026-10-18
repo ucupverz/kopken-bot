@@ -81,7 +81,6 @@ def sanitize_voc_input(text):
     if len(t) < 3 or len(t) > 50: return None
     return t
 
-# === KEYBOARD BARU ===
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
@@ -154,19 +153,16 @@ async def handle_message(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
 
-    # --- STATE BUAT BELI OTP ---
     if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
         qty = int(text)
         await process_direct_buy(update, ctx, qty)
         return
         
-    # --- STATE BUAT DEPOSIT ---
     if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
         amount = int(text)
         await process_deposit(update, ctx, amount)
         return
 
-    # --- STATE BUAT CEK KOPKEN ---
     if ctx.user_data.get('cek_kopken_state') == 'WAITING_PHONE':
         ctx.user_data['cek_kopken_state'] = None
         if not is_valid_phone(text):
@@ -180,7 +176,6 @@ async def handle_message(update, ctx):
         result = await boostly_cek_single(phone)
         
         if not result.get("success"):
-            # --- INI BAGIAN DEBUG ---
             raw_data = result.get("raw", "Ga ada data")
             detail_error = result.get("detail", "Ga ada detail")
             
@@ -192,7 +187,6 @@ async def handle_message(update, ctx):
             )
             await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML)
             return
-            # --- END DEBUG ---
             
         status = result.get("status")
         
@@ -221,7 +215,6 @@ async def handle_message(update, ctx):
         await handle_sfood_message(update, ctx)
         return
 
-    # --- TOMBOL UI BARU ---
     if text == "☕ Cek Nomor Kopken":
         await update.message.reply_text("Silakan kirim nomor HP yang mau dicek.\n\nContoh: `081234567890`", parse_mode=ParseMode.MARKDOWN)
         ctx.user_data['cek_kopken_state'] = 'WAITING_PHONE'
@@ -265,6 +258,32 @@ async def handle_message(update, ctx):
         await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
+    if text == "💰 Deposit Saldo":
+        await cmd_deposit(update, ctx)
+        return
+        
+    if text == "📋 Cek Pesanan":
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
+            return
+            
+        # Cek status dari DB
+        order_db = db.get_otp_order(last_order['order_id'])
+        if order_db:
+            if order_db['status'] == 'success':
+                status_msg = "Selesai (OTP Diterima)"
+            elif order_db['status'] == 'waiting':
+                status_msg = "Menunggu OTP"
+            else:
+                status_msg = order_db['status']
+        else:
+            status_msg = "Tidak diketahui"
+            
+        msg = f"📋 <b>Detail Pesanan Aktif</b>\n\nLayanan: {last_order['service']}\nNomor: <code>{last_order['phone']}</code>\nStatus: {status_msg}"
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        return
+
     if text.startswith("🛒 "):
         match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
         service_name = match.group(1).strip() if match else None
@@ -277,7 +296,6 @@ async def handle_message(update, ctx):
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
 
-    # Pakai VOC buat nambah Balance (Redeem Code)
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
         success, message, quota = db.use_voc(text_upper, user.id)

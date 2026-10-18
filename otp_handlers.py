@@ -27,14 +27,12 @@ def get_menu_keyboard():
 
 async def get_otp_keyboard():
     services = await wahub_client.get_services()
-    
     map_names = {
         "Kopken": "Kopken Gacha",
         "Kopken Filter": "Kopken Asoy",
         "Shopee": "Shope Gacha",
         "Shopee Filter": "Shope Asoy"
     }
-    
     stock_map = {}
     for s in services:
         if s['name'] in map_names:
@@ -60,7 +58,6 @@ def build_all_services_inline(services):
         "Shopee": "Shope Gacha",
         "Shopee Filter": "Shope Asoy"
     }
-    
     keyboard = []
     row = []
     for s in services:
@@ -84,7 +81,6 @@ async def boostly_cek_single(nomor):
     phone = nomor
     if phone.startswith("62"):
         phone = "0" + phone[2:]
-
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             r = await client.post(
@@ -93,31 +89,25 @@ async def boostly_cek_single(nomor):
                 json={"phone": phone}
             )
             resp_json = r.json()
-            
             if resp_json.get("success"):
                 data_api = resp_json.get("data", {})
                 status_api = data_api.get("status", "").upper()
-                
                 if status_api in ["TERDAFTAR", "REGISTERED"]:
                     return {"success": True, "status": "registered", "name": data_api.get("name")}
                 elif status_api in ["BELUM TERDAFTAR", "FRESH", "NOT REGISTERED"]:
                     return {"success": True, "status": "fresh", "name": None}
-                    
             return {"success": False, "detail": "Format respon API tidak dikenal", "raw": resp_json}
-                
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = time_left // 60
     detik = time_left % 60
-    
     if status == "Menunggu OTP":
         total_blocks = 20
         sisa_blocks = int((time_left / 1200) * total_blocks)
         if sisa_blocks < 0: sisa_blocks = 0
         progress_bar = "█" * sisa_blocks + "░" * (total_blocks - sisa_blocks)
-        
         status_line = f"⏳ <b>Menunggu OTP</b>\n<code>[{progress_bar}] {menit:02d}:{detik:02d}</code>"
         otp_line = ""
     elif status == "Selesai":
@@ -126,7 +116,6 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_le
     else:
         status_line = f"❌ Status: <b>{status}</b>"
         otp_line = ""
-
     return (
         f"📦 <b>Pesanan Aktif</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -162,27 +151,22 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = db.get_user(user.id)
     balance = u['saldo'] if u and 'saldo' in u.keys() else 0
-    
     kb_bawah = await get_otp_keyboard()
     services = await wahub_client.get_services()
-    
     if not services:
         await update.message.reply_text("❌ Gagal mengambil daftar layanan.")
         return
-
     text = (
         f"📱 <b>Menu WhatsApp OTP</b>\n\n"
         f"💰 Balance Anda: <b>Rp {balance:,}</b>\n\n"
         f"Silakan pilih layanan dari list di bawah ini, atau dari keyboard bawah."
     )
-    
     inline_kb = build_all_services_inline(services)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=inline_kb)
     await update.message.reply_text("⬇️ Menu cepat:", reply_markup=kb_bawah)
 
 async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
     user = update.effective_user
-    
     if ctx.user_data.get('is_processing'):
         await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
         return
@@ -244,14 +228,12 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     for i in range(qty):
         if not db.deduct_saldo(user.id, harga_satuan):
             break 
-            
         res, code = await wahub_client.rent_number(target_service['id'])
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
             token = res.get('token')
             phone = res.get('phone')
-            
             db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan)
             numbers_bought.append((order_id, token, phone))
         else:
