@@ -210,6 +210,11 @@ def sfood_get_active_orders():
         cursor = conn.execute("SELECT * FROM sfood_orders WHERE status = 'active'")
         return cursor.fetchall()
 
+# === FUNGSI BARU BUAT SFOOD BIAR GA NGIRIM TERUS ===
+def sfood_mark_completed(track_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE sfood_orders SET status = 'completed' WHERE id = ?", (track_id,))
+
 # === FUNGSI BARU BUAT ADMIN LIHAT TOPUP ===
 def get_recent_topups(limit=20):
     with get_conn() as conn:
