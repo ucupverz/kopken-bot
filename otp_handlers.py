@@ -81,7 +81,6 @@ def build_all_services_inline(services):
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-# === FUNGSI API BOOSTLY (FIXED) ===
 async def boostly_cek_single(nomor):
     phone = nomor
     if phone.startswith("62"):
@@ -100,7 +99,6 @@ async def boostly_cek_single(nomor):
                 data_api = resp_json.get("data", {})
                 status_api = data_api.get("status", "").upper()
                 
-                # Nangkep teks dari API (TERDAFTAR / BELUM TERDAFTAR / FRESH)
                 if status_api in ["TERDAFTAR", "REGISTERED"]:
                     return {"success": True, "status": "registered", "name": data_api.get("name")}
                 elif status_api in ["BELUM TERDAFTAR", "FRESH", "NOT REGISTERED"]:
@@ -258,8 +256,10 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan)
             numbers_bought.append((order_id, token, phone))
         else:
+            # TAMPILIN ERROR ASLI DARI WAHUB
+            err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
             db.add_saldo(user.id, harga_satuan)
-            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}. Balance dikembalikan.", reply_markup=kb_bawah)
+            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
             break
             
     if not numbers_bought:
@@ -487,7 +487,6 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, new_oid, display_name, new_ph, 1200))
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph))
         
-        # --- FIX: MUNCULIN PROMO KOPKEN LAGI SETELAH GANTI NOMOR ---
         if "kopken" in api_name.lower() and "filter" not in api_name.lower():
             promo_txt = f"💡 Nomor <code>{new_ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
             promo_txt += f"*(Kamu punya 2x Free Trial cek gratis!)*"
@@ -495,7 +494,8 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
             await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
         
     else:
-        await query.message.reply_text("❌ Gagal mendapatkan nomor baru dari provider. Balance Anda aman.")
+        err_msg = res.get('message') or res.get('error') or "Unknown error"
+        await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML)
 
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -558,8 +558,9 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     asyncio.create_task(run_timer(bot, chat_id, msg_ui.message_id, oid, display_name, ph, 1200))
                     asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
                 else:
+                    err_msg = res.get('message') or res.get('error') or "Unknown error"
                     db.add_saldo(chat_id, amount)
-                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar. Balance Rp {amount:,} dikembalikan.")
+                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance Rp {amount:,} dikembalikan.", parse_mode=ParseMode.HTML)
                 
             else:
                 db.add_saldo(chat_id, amount)
