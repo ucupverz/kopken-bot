@@ -99,49 +99,6 @@ def admin_keyboard():
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
-# === BACKGROUND REFUNDER (ANTI NYANGKUT) ===
-async def bg_check_stuck_orders(app):
-    """Cek tiap 1 menit kalau ada orderan nyangkut > 20 menit, refund."""
-    while True:
-        await asyncio.sleep(60)
-        try:
-            with db.get_conn() as conn:
-                # Cari orderan waiting yang umurnya > 20 menit
-                cursor = conn.execute("""
-                    SELECT * FROM otp_orders 
-                    WHERE status = 'waiting' 
-                    AND created_at <= datetime('now', '-20 minutes')
-                """)
-                stuck_orders = cursor.fetchall()
-                
-                for order in stuck_orders:
-                    oid = order['order_id']
-                    uid = order['user_id']
-                    price = order['price']
-                    sname = order['service_name']
-                    
-                    print(f"[CRON] Refund otomatis order {oid} ({sname})")
-                    
-                    # 1. Cancel ke provider
-                    await wahub_client.cancel_order(oid)
-                    
-                    # 2. Kembalikan saldo & catat history
-                    db.add_saldo(uid, price, f"Refund Auto {sname}")
-                    db.update_otp_order_status(oid, 'expired')
-                    
-                    # 3. Kirim notif ke user
-                    try:
-                        await app.bot.send_message(
-                            chat_id=uid, 
-                            text=f"⏰ <b>Waktu Habis</b>\n\nOrder <code>{oid}</code> tidak menerima OTP dalam 20 menit. Balance Rp {price:,} otomatis dikembalikan.", 
-                            parse_mode=ParseMode.HTML
-                        )
-                    except Exception:
-                        pass
-                        
-        except Exception as e:
-            print(f"[CRON] Error: {e}")
-
 async def cmd_start(update, ctx):
     user = update.effective_user
     db.create_user(user.id, user.username or "", user.first_name or "")

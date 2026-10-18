@@ -229,20 +229,29 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     numbers_bought = []
     for i in range(qty):
-        if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
-            break 
-        res, code = await wahub_client.rent_number(target_service['id'])
+        # 1. Tembak API Wahub dulu (JANGAN POTONG SALDO DULU)
+        try:
+            res, code = await asyncio.wait_for(wahub_client.rent_number(target_service['id']), timeout=15)
+        except asyncio.TimeoutError:
+            await update.message.reply_text(f"❌ Server Provider (Wahub) Timeout (15s). Balance tidak dipotong, silakan coba lagi nanti.")
+            ctx.user_data['is_processing'] = False
+            return
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
             token = res.get('token')
             phone = res.get('phone')
+            
+            # 2. Baru potong saldo SETELAH nomor berhasil didapat
+            if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
+                await wahub_client.cancel_order(order_id)
+                break 
+                
             db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan)
             numbers_bought.append((order_id, token, phone))
         else:
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
-            db.add_saldo(user.id, harga_satuan, f"Refund Gagal Order")
-            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
             break
             
     if not numbers_bought:
@@ -534,7 +543,12 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                 service_id = ctx.user_data.get('buy_id')
                 qty = ctx.user_data.get('buy_qty', 1)
                 
-                res, code = await wahub_client.rent_number(service_id)
+                # --- FIX: JANGAN POTONG SALDO DULU ---
+                try:
+                    res, code = await asyncio.wait_for(wahub_client.rent_number(service_id), timeout=15)
+                except asyncio.TimeoutError:
+                    await bot.send_message(chat_id, f"❌ Server Provider Timeout. Balance Rp {amount:,} tidak dipotong, silakan coba lagi.")
+                    return
                 
                 if code == 200 and res.get('order_id'):
                     oid = res['order_id']
@@ -542,6 +556,8 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     ph = res['phone']
                     harga_satuan = amount // qty
                     
+                    # Potong saldo setelah order ID didapat
+                    db.deduct_saldo(chat_id, amount, f"Beli {display_name}")
                     db.create_otp_order(chat_id, oid, tkn, ph, display_name, harga_satuan)
                     ctx.bot_data[f"poll_{oid}"] = True
                     
@@ -554,8 +570,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
                 else:
                     err_msg = res.get('message') or res.get('error') or "Unknown error"
-                    db.add_saldo(chat_id, amount, "Refund Gagal Order")
-                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance Rp {amount:,} dikembalikan.", parse_mode=ParseMode.HTML)
+                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance tidak dipotong.")
                 
             else:
                 db.add_saldo(chat_id, amount, f"Topup QRIS Rp {amount:,}")
