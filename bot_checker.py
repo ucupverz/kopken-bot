@@ -96,13 +96,14 @@ def admin_keyboard():
         ["📱 WhatsApp OTP", "💳 Topup Balance"],
         ["🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "🔧 Admin Panel"],
-        ["🆕 User Baru", "📥 Topup Log"],
+        ["📥 Topup Log", "🆕 User Baru"],
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
+# === BACKGROUND REFUNDER (ANTI NYANGKUT) ===
 async def bg_check_stuck_orders(app):
     while True:
-        await asyncio.sleep(120) 
+        await asyncio.sleep(60)
         try:
             with db.get_conn() as conn:
                 cursor = conn.execute("""
@@ -133,7 +134,6 @@ async def bg_check_stuck_orders(app):
                         )
                     except Exception:
                         pass
-                    await asyncio.sleep(2)
         except Exception as e:
             print(f"[CRON] Error: {e}")
 
@@ -296,6 +296,30 @@ async def handle_message(update, ctx):
     if text == "🔧 Admin Panel" and is_admin(user.id):
         await cmd_admin(update, ctx)
         return
+        
+    if text == "📥 Topup Log" and is_admin(user.id):
+        topups = db.get_recent_topups(10)
+        if not topups:
+            await update.message.reply_text("Belum ada topup.")
+            return
+        txt = "📥 *10 Topup Terakhir*\n\n"
+        import datetime as dtmod
+        for t in topups:
+            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+            txt += f"🟢 Rp {t['amount']:,} | User: `{t['user_id']}` | {jam}\n"
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if text == "🆕 User Baru" and is_admin(user.id):
+        users = db.get_recent_users(10)
+        txt = "🆕 *10 User Terbaru*\n\n"
+        import datetime as dtmod
+        for u in users:
+            jam = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
+            uname = f"@{u['username']}" if u['username'] else "(no uname)"
+            txt += f"👤 `{u['user_id']}` | {u['first_name']} {uname} | {jam}\n"
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        return
 
     if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
@@ -336,30 +360,6 @@ async def handle_message(update, ctx):
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
 
-    if text == "📥 Topup Log" and is_admin(user.id):
-        topups = db.get_recent_topups(10)
-        if not topups:
-            await update.message.reply_text("Belum ada topup.")
-            return
-        txt = "📥 *10 Topup Terakhir*\n\n"
-        import datetime as dtmod
-        for t in topups:
-            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-            txt += f"🟢 Rp {t['amount']:,} | User: `{t['user_id']}` | {jam}\n"
-        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "🆕 User Baru" and is_admin(user.id):
-        users = db.get_recent_users(10)
-        txt = "🆕 *10 User Terbaru*\n\n"
-        import datetime as dtmod
-        for u in users:
-            jam = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
-            uname = f"@{u['username']}" if u['username'] else "(no uname)"
-            txt += f"👤 `{u['user_id']}` | {u['first_name']} {uname} | {jam}\n"
-        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
-        return
-
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
         success, message, quota = db.use_voc(text_upper, user.id)
@@ -374,32 +374,7 @@ async def handle_message(update, ctx):
 async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    text = (
-        f"🔧 *Admin Panel*\n\n"
-        f"👥 Users: {s['total_users']}\n"
-        f"☕ Total cek: {s['total_cek']}\n\n"
-        f"*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n"
-        f"*Cek Topup Terakhir:* `/topups`\n\n"
-        f"*ShopeeFood Admin:*\n"
-        f"`/sfood_users` — List user\n"
-        f"`/sfood_leaderboard` — Leaderboard\n"
-        f"`/sfood_userinfo <id>` — Detail user\n\n"
-        f"*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-async def cmd_topups(update, ctx):
-    if not is_admin(update.effective_user.id): return
-    topups = db.get_recent_topups(15)
-    if not topups:
-        await update.message.reply_text("Belum ada topup terbaru.")
-        return
-    import datetime as dtmod
-    text = "💰 *15 Topup Terakhir*\n\n"
-    for t in topups:
-        jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-        uname = f"@{t['username']}" if t['username'] else t['first_name']
-        text += f"🟢 +Rp {t['amount']:,} | {uname} | {jam}\n"
+    text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n\n*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_genvoc(update, ctx):
@@ -455,7 +430,7 @@ async def cmd_addsaldo(update, ctx):
     try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
     except ValueError: return
     if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
-    db.add_saldo(uid, amt)
+    db.add_saldo(uid, amt, f"Admin Add Saldo")
     new_s = db.get_user(uid)["saldo"]
     await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}", parse_mode=ParseMode.MARKDOWN)
 
@@ -524,34 +499,7 @@ async def lifespan(app: FastAPI):
     print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
     asyncio.create_task(tracker_worker(bot_app.bot))
     print("[SFOOD] Tracker worker started")
-    asyncio.create_task(bg_check_stuck_orders(bot_app))
-    print("[CRON] Background refunder started")
-    yield
-    await bot_app.stop()
-    await bot_app.shutdown()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global bot_app
-    await bot_app.initialize()
-    await bot_app.start()
-    
-    # === TAMBAHIN INI BUAT BERSIHIN LOOP SFOOD ===
-    try:
-        with db.get_conn() as conn:
-            conn.execute("UPDATE sfood_orders SET status = 'done' WHERE status = 'active'")
-            print("✅ Semua sfood_orders nyangkut di-set done.")
-    except Exception as e:
-        print(f"⚠️ Gagal bersihin sfood_orders: {e}")
-    # =============================================
-    
-    await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram-webhook", drop_pending_updates=True)
-    print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
-    
-    # (Kalo lu mau matiin total SFOOD, komen baris di bawah ini)
-    # asyncio.create_task(tracker_worker(bot_app.bot))
-    # print("[SFOOD] Tracker worker started")
-    
+    # JALANIN BACKGROUND REFUNDER
     asyncio.create_task(bg_check_stuck_orders(bot_app))
     print("[CRON] Background refunder started")
     yield
@@ -632,7 +580,6 @@ def main():
     bot_app.add_handler(CommandHandler("users", cmd_users))
     bot_app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
-    bot_app.add_handler(CommandHandler("topups", cmd_topups))
     
     bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
     bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act_"))
