@@ -5,7 +5,6 @@ import datetime
 DB_PATH = os.getenv("DB_PATH", "kopken.db")
 
 def get_conn():
-    # isolation_level=None biar support BEGIN IMMEDIATE (Anti race-condition)
     conn = sqlite3.connect(DB_PATH, timeout=20, isolation_level=None)
     conn.row_factory = sqlite3.Row
     return conn
@@ -46,7 +45,6 @@ def init_db():
                 used_at TIMESTAMP
             )
         """)
-        # Tabel Transaksi
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +131,12 @@ def get_otp_order(order_id):
     with get_conn() as conn:
         cursor = conn.execute("SELECT * FROM otp_orders WHERE order_id = ?", (order_id,))
         return cursor.fetchone()
+
+# === FUNGSI SFOOD YANG SEMPET HILANG ===
+def sfood_get_active_orders():
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM sfood_orders WHERE status = 'active'")
+        return cursor.fetchall()
 
 def create_voc(code, quota, created_by):
     with get_conn() as conn:
