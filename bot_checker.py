@@ -22,7 +22,8 @@ from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_otp_keyboard, handle_cekstatus_callback,
     handle_cek_kopken_callback, handle_order_action_callback, 
-    handle_buy_filter_auto_cancel_callback, handle_buy_callback
+    handle_buy_filter_auto_cancel_callback, handle_buy_callback,
+    boostly_cek_single, BIAYA_CEK_FRESH
 )
 
 from sfood_handlers import (
@@ -80,19 +81,19 @@ def sanitize_voc_input(text):
     if len(t) < 3 or len(t) > 50: return None
     return t
 
-# === KEYBOARD BARU (BALANCE, NO KUOTA) ===
+# === KEYBOARD BARU ===
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        ["💰 Cek Balance", "🔑 Pakai Kode VOC"],
-        ["📱 WhatsApp OTP"],
+        ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
+        ["📱 WhatsApp OTP", "🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 def admin_keyboard():
     return ReplyKeyboardMarkup([
-        ["💰 Cek Balance", "🔑 Pakai Kode VOC"],
-        ["📱 WhatsApp OTP"],
+        ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
+        ["📱 WhatsApp OTP", "🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "📊 Tarif ShopeeFood"],
         ["📡 Pantau Kurir", "🔧 Admin Panel"],
         ["❓ Bantuan"]
@@ -115,6 +116,8 @@ async def cmd_start(update, ctx):
 async def cmd_help(update, ctx):
     text = (
         "📖 *Bantuan*\n\n"
+        "*☕ Cek Nomor Kopken:*\n"
+        "• Klik tombol Cek Nomor Kopken, lalu masukkan nomor HP.\n\n"
         "*📱 OTP:*\n"
         "• Klik tombol WhatsApp OTP di keyboard\n\n"
         "*🍔 ShopeeFood Tracker:*\n"
@@ -151,18 +154,82 @@ async def handle_message(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
 
+    # --- STATE BUAT BELI OTP ---
     if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
         qty = int(text)
         await process_direct_buy(update, ctx, qty)
         return
         
+    # --- STATE BUAT DEPOSIT ---
     if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
         amount = int(text)
         await process_deposit(update, ctx, amount)
         return
 
+    # --- STATE BUAT CEK KOPKEN ---
+    if ctx.user_data.get('cek_kopken_state') == 'WAITING_PHONE':
+        ctx.user_data['cek_kopken_state'] = None
+        if not is_valid_phone(text):
+            await update.message.reply_text("❌ Format nomor tidak valid. Silakan coba lagi.")
+            return
+        
+        phone = normalize_phone(text)
+        msg = await update.message.reply_text("🔍 Mengecek nomor Kopken...")
+        
+        # --- LOGIKA FREE TRIAL ---
+        trial_tersisa = db.get_trial_kopken(user.id)
+        result = await boostly_cek_single(phone)
+        
+        if not result.get("success"):
+            services = await wahub_client.get_services()
+            target_filter = next((s for s in services if s['name'].lower() == "kopken filter"), None)
+            
+            if target_filter and target_filter['stock'] > 0:
+                harga_filter = target_filter['price'] + 700
+                btn_text = f"🛒 Beli Kopken Filter ({target_filter['stock']}) - {harga_filter:,}"
+                filter_kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{target_filter['id']}_{harga_filter}_Kopken Filter")]])
+            else:
+                filter_kb = None
+
+            promo_txt = (
+                f"⚠️ <b>Sistem Cek Kopken Sedang Maintenance.</b>\n\n"
+                f"Lu ga perlu pusing, lu bisa langsung pakai nomor <code>{phone}</code> ini.\n"
+                f"Kalau mau beli nomor yang <b>PASTI AMAN & GA PERLU DI CEK</b>, disarankan beli <b>Kopken Filter</b> ya!"
+            )
+            await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML, reply_markup=filter_kb)
+            return
+            
+        status = result.get("status")
+        
+        if status == "fresh":
+            if trial_tersisa > 0:
+                db.set_trial_kopken(user.id, trial_tersisa - 1)
+                reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n🎁 Kamu menggunakan 1x Free Trial cek. Sisa trial: {trial_tersisa-1}x."
+            else:
+                u = db.get_user(user.id)
+                balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+                if balance < BIAYA_CEK_FRESH:
+                    await msg.edit_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
+                    return
+                db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
+                reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
+                
+        elif status == "registered":
+            reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {result.get('name') or '-'}\n\n💳 Cek GRATIS."
+        else:
+            reply = f"❓ Status tidak dikenal: `{status}`"
+            
+        await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
+        return
+
     if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
         await handle_sfood_message(update, ctx)
+        return
+
+    # --- TOMBOL UI BARU ---
+    if text == "☕ Cek Nomor Kopken":
+        await update.message.reply_text("Silakan kirim nomor HP yang mau dicek.\n\nContoh: `081234567890`", parse_mode=ParseMode.MARKDOWN)
+        ctx.user_data['cek_kopken_state'] = 'WAITING_PHONE'
         return
 
     if text == "💰 Cek Balance":
@@ -173,20 +240,12 @@ async def handle_message(update, ctx):
         await cmd_otp_menu(update, ctx)
         return
         
-    if text == "🔑 Pakai Kode VOC":
-        await update.message.reply_text("Kirim kode VOC kamu.\n\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN)
+    if text == "🔑 Redeem Invitation Code":
+        await update.message.reply_text("Silakan kirim kode Invitation / VOC kamu.\n\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN)
         return
 
     if text == "🍔 ShopeeFood":
         await cmd_sfood(update, ctx)
-        return
-
-    if text == "📋 List Order":
-        await cmd_sfood_list(update, ctx)
-        return
-
-    if text == "❌ Stop Order":
-        await update.message.reply_text("Kirim: <code>/sfood_stop &lt;order_id&gt;</code>\n\nAtau: /sfood_stopall", parse_mode=ParseMode.HTML)
         return
 
     if text == "📊 Tarif ShopeeFood":
@@ -211,24 +270,6 @@ async def handle_message(update, ctx):
         await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    if text == "💰 Deposit Saldo":
-        await cmd_deposit(update, ctx)
-        return
-        
-    if text == "📋 Cek Pesanan":
-        if ctx.user_data.get('is_processing'):
-            await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
-            return
-        last_order = ctx.user_data.get('last_order')
-        if not last_order:
-            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
-            return
-        status = "Menunggu OTP"
-        if last_order.get('status') == 'success': status = "Selesai (OTP Diterima)"
-        msg = f"📋 <b>Detail Pesanan Aktif</b>\n\nLayanan: {last_order['service']}\nNomor: <code>{last_order['phone']}</code>\nStatus: {status}"
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
-        return
-
     if text.startswith("🛒 "):
         match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
         service_name = match.group(1).strip() if match else None
@@ -241,10 +282,10 @@ async def handle_message(update, ctx):
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
 
-    # Pakai VOC buat nambah Balance
+    # Pakai VOC buat nambah Balance (Redeem Code)
     text_upper = text.upper()
     if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
-        success, message, quota = db.use_voc(text_upper, user.id) # quota di sini lu ubah jadi nominal uang misal Rp 5000
+        success, message, quota = db.use_voc(text_upper, user.id)
         if success:
             await update.message.reply_text(f"✅ *{message}*\n\nSekarang Balance kamu: *Rp {db.get_user(user.id)['saldo']:,}*.", parse_mode=ParseMode.MARKDOWN)
         else:
