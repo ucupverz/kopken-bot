@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 import database as db
 import wahub_client
@@ -229,6 +230,9 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     numbers_bought = []
     for i in range(qty):
         if not db.deduct_saldo(user.id, harga_satuan):
+            u_skrg = db.get_user(user.id)
+            saldo_skrg = u_skrg['saldo'] if u_skrg and 'saldo' in u_skrg.keys() else 0
+            await update.message.reply_text(f"❌ Gagal memotong saldo.\n\n💰 Saldo kamu: Rp {saldo_skrg:,}\n💸 Butuh: Rp {harga_satuan:,}\n\nCek saldo lu atau sistem lagi sibuk.", parse_mode=ParseMode.HTML)
             break 
         res, code = await wahub_client.rent_number(target_service['id'])
         
@@ -266,20 +270,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             ctx.user_data['ui_msg_id'] = msg_ui.message_id
             ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
         
-        if ctx.job_queue:
-            ctx.job_queue.run_once(
-                callback=task_timeout_job,
-                when=1200,
-                data={
-                    "user_id": user.id,
-                    "order_id": oid,
-                    "msg_id": msg_ui.message_id,
-                    "service_name": display_name,
-                    "phone": ph,
-                    "price": harga_satuan
-                }
-            )
-            
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph))
 
     if "kopken" in api_name.lower() and "filter" not in api_name.lower():
@@ -290,31 +280,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
 
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
-
-async def task_timeout_job(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    data = job.data
-    user_id = data["user_id"]
-    oid = data["order_id"]
-    msg_id = data["msg_id"]
-    price = data["price"]
-    
-    db_order = db.get_otp_order(oid)
-    if db_order and db_order['status'] == 'waiting':
-        cxl_res, cxl_status = await wahub_client.cancel_order(oid)
-        if cxl_status == 200:
-            db.update_otp_order_status(oid, 'expired')
-            db.add_saldo(user_id, price)
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=user_id,
-                    message_id=msg_id,
-                    text=f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk dalam 20 menit. Balance Rp {price:,} dikembalikan.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_inline_keyboard("Selesai")
-                )
-            except Exception:
-                pass
 
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
@@ -347,6 +312,38 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             return
             
         await asyncio.sleep(15)
+        
+    # Timeout fallback 20 menit (kalau poll di atas ga nangkep)
+    res, status = await wahub_client.check_otp(token, timeout=15)
+    if status == 200 and res.get('state') == 'success':
+        otp = res.get('otp')
+        db.update_otp_order_status(order_id, 'success', otp)
+        await wahub_client.mark_done(order_id)
+        ui_text = build_order_ui(order_id, service_name, phone, "Selesai", otp=otp)
+        try:
+            await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
+        except Exception:
+            pass
+        return
+        
+    db_order = db.get_otp_order(order_id)
+    if db_order and db_order['status'] == 'waiting':
+        cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
+        if cxl_status == 200:
+            db.update_otp_order_status(order_id, 'expired')
+            db.add_saldo(user_id, db_order['price'])
+            
+            ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk dalam 20 menit. Balance Rp {db_order['price']:,} dikembalikan."
+            try:
+                await bot.edit_message_text(
+                    chat_id=user_id, 
+                    message_id=msg_id, 
+                    text=ui_text, 
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard("Selesai")
+                )
+            except Exception:
+                pass
 
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -458,20 +455,6 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
         
-        if ctx.job_queue:
-            ctx.job_queue.run_once(
-                callback=task_timeout_job,
-                when=1200,
-                data={
-                    "user_id": user.id,
-                    "order_id": new_oid,
-                    "msg_id": msg_ui.message_id,
-                    "service_name": display_name,
-                    "phone": new_ph,
-                    "price": harga
-                }
-            )
-            
         asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph))
         
         if "kopken" in api_name.lower() and "filter" not in api_name.lower():
@@ -549,20 +532,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
                     ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "msg_id": msg_ui.message_id}
                     
-                    if ctx.job_queue:
-                        ctx.job_queue.run_once(
-                            callback=task_timeout_job,
-                            when=1200,
-                            data={
-                                "user_id": chat_id,
-                                "order_id": oid,
-                                "msg_id": msg_ui.message_id,
-                                "service_name": display_name,
-                                "phone": ph,
-                                "price": harga_satuan
-                            }
-                        )
-                        
                     asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
                 else:
                     err_msg = res.get('message') or res.get('error') or "Unknown error"
