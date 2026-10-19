@@ -362,7 +362,6 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             except Exception:
                 pass
 
-# === FITUR CEK RIWAYAT / HISTORY ===
 async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
@@ -390,7 +389,6 @@ async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     await query.answer()
     await query.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-# === FITUR BATAL & REFUND ===
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -601,6 +599,7 @@ async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
 
+# === INI YANG TADI KEHAPUS (HANDLE BUY CALLBACK) ===
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
