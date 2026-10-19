@@ -571,6 +571,7 @@ async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
 
+# === INI FIX BENGONGNYA ===
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -584,7 +585,12 @@ async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['buy_qty'] = 1
     ctx.user_data['buy_total'] = harga_jual
     ctx.user_data['buy_id'] = service_id
-    await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML)
+    
+    # Kirim pesan baru, jangan edit (karena edit ke ReplyKeyboard sering diblock Telegram)
+    await query.message.reply_text(
+        f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
+        parse_mode=ParseMode.HTML
+    )
     ctx.user_data['buy_state'] = 'WAITING_QTY'
 
 async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
