@@ -22,6 +22,7 @@ from otp_handlers import (
     handle_order_action_callback, handle_buy_callback,
     boostly_cek_single, BIAYA_CEK_FRESH, CALLBACK_SEP, _do_cek_kopken,
     build_order_ui, get_order_inline_keyboard,
+    handle_history_callback, handle_menu_back_callback,  # <-- TAMBAHIN INI
 )
 
 from sfood_handlers import (
@@ -580,6 +581,8 @@ def main():
     bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act\|"))
     bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken\|"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy\|"))
+    bot_app.add_handler(CallbackQueryHandler(handle_history_callback, pattern=r"^otp_history$"))
+    bot_app.add_handler(CallbackQueryHandler(handle_menu_back_callback, pattern=r"^otp_menu_back$"))
 
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

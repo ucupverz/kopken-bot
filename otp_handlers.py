@@ -4,7 +4,7 @@ import os
 import re
 import time
 from datetime import datetime
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, BadRequest
@@ -28,237 +28,84 @@ MAP_DISPLAY = {
 MAP_BACK = {v.lower(): k for k, v in MAP_DISPLAY.items()}
 CALLBACK_SEP = "|"
 
-def get_menu_keyboard():
+def get_otp_menu_keyboard():
     return ReplyKeyboardMarkup([
-        ["📱 WhatsApp OTP", "💰 Cek Balance"],
-        ["🔙 Kembali ke Menu"]
+        ["🔙 Balik ke Menu Utama"]
     ], resize_keyboard=True)
-
-async def get_otp_keyboard():
-    services = await wahub_client.get_services()
-    stock_map = {}
-    for s in services:
-        clean = s['name'].strip().lower()
-        if clean in MAP_DISPLAY:
-            stock_map[MAP_DISPLAY[clean]] = s
-
-    def fmt(name):
-        s = stock_map.get(name)
-        if s:
-            return f"🛒 {name} ({s['stock']}) - {s['price']+MARGIN:,}"
-        return f"🛒 {name} (0) - 0"
-
-    return ReplyKeyboardMarkup([
-        [fmt("Kopken Gacha"), fmt("Kopken Asoy")],
-        [fmt("Shope Gacha"), fmt("Shope Asoy")],
-        ["📋 Cek Pesanan", "💰 Cek Balance"],
-        ["🔙 Kembali ke Menu"]
-    ], resize_keyboard=True)
-
-def build_all_services_inline(services):
-    keyboard = []
-    row = []
-    for s in services:
-        clean = s['name'].strip().lower()
-        if clean not in MAP_DISPLAY:
-            continue
-        display = MAP_DISPLAY[clean]
-        if s['stock'] > 0:
-            harga = s['price'] + MARGIN
-            btn = InlineKeyboardButton(
-                f"{display} | {harga:,} (Stok: {s['stock']})",
-                callback_data=f"otp_buy{CALLBACK_SEP}{s['id']}{CALLBACK_SEP}{harga}{CALLBACK_SEP}{display}"
-            )
-            row.append(btn)
-        else:
-            row.append(InlineKeyboardButton(f"{display} (Habis)", callback_data="otp_none"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    return InlineKeyboardMarkup(keyboard)
-
-def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
-    menit = max(time_left, 0) // 60
-    detik = max(time_left, 0) % 60
-    if status == "Menunggu OTP":
-        blocks = 20
-        sisa = max(0, min(blocks, int((time_left / 1200) * blocks)))
-        bar = "█" * sisa + "░" * (blocks - sisa)
-        status_line = f"⏳ <b>Menunggu OTP</b>\n<code>[{bar}] {menit:02d}:{detik:02d}</code>"
-        otp_line = ""
-    elif status == "Selesai":
-        # Timer tetap terlihat di bawah OTP
-        status_line = f"✅ <b>Pesanan Selesai</b>\n<code>[Sisa Waktu: {menit:02d}:{detik:02d}]</code>"
-        otp_line = f"🔑 Kode OTP: <code>{otp}</code>\n"
-    else:
-        status_line = f"❌ Status: <b>{status}</b>"
-        otp_line = ""
-    return (
-        "📦 <b>Pesanan Aktif</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Order ID: <code>{order_id}</code>\n"
-        f"📞 No. HP: <code>{phone}</code>\n"
-        f"📱 Layanan: {service_name}\n"
-        f"{status_line}\n"
-        f"{otp_line}"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>Jangan bagikan kode ini ke siapa pun.</i>"
-    )
-
-def get_order_inline_keyboard(order_id, status="Menunggu OTP"):
-    if status == "Menunggu OTP":
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔄 Ganti Nomor", callback_data=f"otp_act{CALLBACK_SEP}ganti{CALLBACK_SEP}{order_id}"),
-                InlineKeyboardButton("❌ Batal & Refund", callback_data=f"otp_act{CALLBACK_SEP}batal{CALLBACK_SEP}{order_id}"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
-            ],
-        ])
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
-            InlineKeyboardButton("✅ Selesai", callback_data=f"otp_act{CALLBACK_SEP}selesai{CALLBACK_SEP}{order_id}"),
-        ],
-    ])
-
-async def boostly_cek_single(nomor):
-    phone = nomor
-    if phone.startswith("62"):
-        phone = "0" + phone[2:]
-    for attempt in range(2):
-        async with httpx.AsyncClient(timeout=15) as client:
-            try:
-                r = await client.post(
-                    f"{BOOSTLY_BASE}/api/v1/check",
-                    headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"},
-                    json={"phone": phone},
-                )
-                data = r.json()
-                if data.get("success"):
-                    d = data.get("data", {})
-                    st = (d.get("status") or "").upper()
-                    if st in ("TERDAFTAR", "REGISTERED"):
-                        return {"success": True, "status": "registered", "name": d.get("name")}
-                    if st in ("BELUM TERDAFTAR", "FRESH", "NOT REGISTERED"):
-                        return {"success": True, "status": "fresh", "name": None}
-                return {"success": False, "detail": f"HTTP {r.status_code}", "raw": data}
-            except Exception as e:
-                if attempt == 1:
-                    return {"success": False, "detail": f"Network: {e}", "raw": None}
-                await asyncio.sleep(1)
-    return {"success": False, "detail": "unknown", "raw": None}
-
-async def send_order_ui(bot, chat_id, order_id, service_name, phone, user_id, total_time=1200):
-    text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", total_time)
-    msg = await bot.send_message(
-        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
-        reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP"),
-    )
-    db.set_order_msg_id(order_id, msg.message_id)
-    asyncio.create_task(run_timer(bot, chat_id, msg.message_id, order_id, service_name, phone, total_time))
-    asyncio.create_task(poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg.message_id, total_time))
-    return msg
-
-async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
-    start = time.time()
-    while True:
-        await asyncio.sleep(5)
-        left = total_time - int(time.time() - start)
-        if left <= 0:
-            return
-        order = db.get_otp_order(order_id)
-        if not order:
-            return
-            
-        # Kalau OTP sudah masuk (status success), timer lanjut update UI mode "Selesai"
-        if order['status'] == 'success':
-            try:
-                ui = build_order_ui(order_id, service_name, phone, "Selesai", left, order['otp'])
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id, text=ui,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-                )
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
-            except Exception:
-                pass
-        elif order['status'] == 'waiting':
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id,
-                    text=build_order_ui(order_id, service_name, phone, "Menunggu OTP", left),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP"),
-                )
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
-            except Exception:
-                pass
-        else:
-            # expired / cancelled, stop timer
-            return
-
-async def poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg_id, total_time):
-    start = time.time()
-    while time.time() - start < total_time:
-        order = db.get_otp_order(order_id)
-        if not order:
-            return
-        if order['status'] != 'waiting':
-            return # Timer udah handle UI, hentikan polling
-            
-        res, status = await wahub_client.check_otp(order['token'], timeout=15)
-        if status == 200 and res.get('state') == 'success':
-            otp = res.get('otp')
-            if db.mark_success_if_waiting(order_id, otp):
-                await wahub_client.mark_done(order_id)
-                # UI akan di-update sama run_timer jadi "Selesai", poll berenti
-            return
-        await asyncio.sleep(15)
-
-    # Kalau waktu abis dan belum dapet OTP, baru refund
-    order = db.get_otp_order(order_id)
-    if order and order['status'] == 'waiting':
-        res, status = await wahub_client.check_otp(order['token'], timeout=15)
-        if status == 200 and res.get('state') == 'success':
-            otp = res.get('otp')
-            if db.mark_success_if_waiting(order_id, otp):
-                await wahub_client.mark_done(order_id)
-            return
-            
-        cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
-        if cxl_status == 200 and db.mark_status_if_waiting(order_id, 'expired'):
-            db.add_saldo(user_id, order['price'], "Refund OTP Timeout")
-            ui = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {order['price']:,} dikembalikan."
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id, text=ui,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-                )
-            except Exception:
-                pass
 
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = db.get_user(user.id)
     balance = u['saldo'] if u else 0
+    
     services = await wahub_client.get_services()
     if not services:
         await update.message.reply_text("❌ Gagal mengambil daftar layanan.")
         return
+
+    keyboard = []
+    for s in services:
+        clean = s['name'].strip().lower()
+        if clean not in MAP_DISPLAY:
+            continue
+        display = MAP_DISPLAY[clean]
+        
+        if s['stock'] > 0:
+            harga = s['price'] + MARGIN
+            btn_text = f"🛒 {display} | Rp {harga:,} (Stok: {s['stock']})"
+            keyboard.append([InlineKeyboardButton(
+                btn_text, 
+                callback_data=f"otp_buy{CALLBACK_SEP}{s['id']}{CALLBACK_SEP}{harga}{CALLBACK_SEP}{display}"
+            )])
+        else:
+            keyboard.append([InlineKeyboardButton(
+                f"❌ {display} (Stok Habis)", 
+                callback_data="otp_none"
+            )])
+            
+    # Tambahin tombol Riwayat di paling bawah
+    keyboard.append([InlineKeyboardButton("📋 Riwayat Pesanan", callback_data="otp_history")])
+    inline_kb = InlineKeyboardMarkup(keyboard)
+
     text = (
         "📱 <b>Menu WhatsApp OTP</b>\n\n"
         f"💰 Balance Anda: <b>Rp {balance:,}</b>\n\n"
-        "Silakan pilih layanan di bawah ini."
+        "Silakan pilih layanan di bawah ini:"
+    )
+    
+    await update.message.reply_text(
+        text, 
+        parse_mode=ParseMode.HTML, 
+        reply_markup=inline_kb
     )
     await update.message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=build_all_services_inline(services)
+        "⬇️ Gunakan tombol di bawah untuk kembali.", 
+        reply_markup=get_otp_menu_keyboard()
+    )
+
+async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(CALLBACK_SEP)
+    if len(parts) != 4:
+        return
+    _, sid, harga, name = parts
+    try:
+        sid_i = int(sid)
+        harga_i = int(harga)
+    except ValueError:
+        return
+    
+    ctx.user_data['buy_service'] = name
+    ctx.user_data['buy_qty'] = 1
+    ctx.user_data['buy_total'] = harga_i
+    ctx.user_data['buy_id'] = sid_i
+    ctx.user_data['buy_state'] = 'WAITING_QTY'
+    
+    await query.message.reply_text(
+        f"Berapa nomor <b>{name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove()
     )
 
 async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
@@ -269,6 +116,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     if ctx.user_data.get('is_processing'):
         await update.message.reply_text("⏳ Mohon tunggu, pesanan sebelumnya sedang diproses.")
         return
+        
     ctx.user_data['is_processing'] = True
     try:
         display_name = ctx.user_data.get('buy_service')
@@ -277,6 +125,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         api_name = MAP_BACK.get(display_name.lower(), display_name.lower())
         services = await wahub_client.get_services()
         target = next((s for s in services if s['name'].strip().lower() == api_name), None)
+        
         if not target:
             await update.message.reply_text("❌ Layanan tidak ditemukan.")
             return
@@ -356,27 +205,148 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         ctx.user_data['buy_state'] = None
         ctx.user_data['is_processing'] = False
 
-async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    parts = query.data.split(CALLBACK_SEP)
-    if len(parts) != 4:
-        return
-    _, sid, harga, name = parts
-    try:
-        sid_i = int(sid)
-        harga_i = int(harga)
-    except ValueError:
-        return
-    ctx.user_data['buy_service'] = name
-    ctx.user_data['buy_qty'] = 1
-    ctx.user_data['buy_total'] = harga_i
-    ctx.user_data['buy_id'] = sid_i
-    await query.edit_message_text(
-        f"Berapa nomor <b>{name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)",
-        parse_mode=ParseMode.HTML,
+def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
+    menit = max(time_left, 0) // 60
+    detik = max(time_left, 0) % 60
+    if status == "Menunggu OTP":
+        blocks = 20
+        sisa = max(0, min(blocks, int((time_left / 1200) * blocks)))
+        bar = "█" * sisa + "░" * (blocks - sisa)
+        status_line = f"⏳ <b>Menunggu OTP</b>\n<code>[{bar}] {menit:02d}:{detik:02d}</code>"
+        otp_line = ""
+    elif status == "Selesai":
+        status_line = f"✅ <b>Pesanan Selesai</b>\n<code>[Sisa Waktu: {menit:02d}:{detik:02d}]</code>"
+        otp_line = f"🔑 Kode OTP: <code>{otp}</code>\n"
+    else:
+        status_line = f"❌ Status: <b>{status}</b>"
+        otp_line = ""
+    return (
+        "📦 <b>Pesanan Aktif</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Order ID: <code>{order_id}</code>\n"
+        f"📞 No. HP: <code>{phone}</code>\n"
+        f"📱 Layanan: {service_name}\n"
+        f"{status_line}\n"
+        f"{otp_line}"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Jangan bagikan kode ini ke siapa pun.</i>"
     )
-    ctx.user_data['buy_state'] = 'WAITING_QTY'
+
+def get_order_inline_keyboard(order_id, status="Menunggu OTP", service_name=""):
+    if status == "Menunggu OTP":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Ganti Nomor", callback_data=f"otp_act{CALLBACK_SEP}ganti{CALLBACK_SEP}{order_id}"),
+                InlineKeyboardButton("❌ Batal & Refund", callback_data=f"otp_act{CALLBACK_SEP}batal{CALLBACK_SEP}{order_id}"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
+            ],
+        ])
+    
+    # Tampilan setelah selesai / OTP masuk
+    kb = []
+    # Cari ID layanan buat callback beli lagi
+    s_id = "0"
+    if service_name:
+        api_name = MAP_BACK.get(service_name.lower(), service_name.lower())
+        # Ini trick simpel, kirim callback buat buka menu OTP lagi
+        kb.append([InlineKeyboardButton("🛒 Beli Lagi", callback_data="otp_menu_back")])
+    
+    kb.append([
+        InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
+        InlineKeyboardButton("✅ Selesai", callback_data=f"otp_act{CALLBACK_SEP}selesai{CALLBACK_SEP}{order_id}"),
+    ])
+    kb.append([InlineKeyboardButton("🔙 Menu Utama", callback_data="otp_menu_back")])
+    return InlineKeyboardMarkup(kb)
+
+async def send_order_ui(bot, chat_id, order_id, service_name, phone, user_id, total_time=1200):
+    text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", total_time)
+    msg = await bot.send_message(
+        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+        reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP", service_name),
+    )
+    db.set_order_msg_id(order_id, msg.message_id)
+    asyncio.create_task(run_timer(bot, chat_id, msg.message_id, order_id, service_name, phone, total_time))
+    asyncio.create_task(poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg.message_id, total_time))
+    return msg
+
+async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
+    start = time.time()
+    while True:
+        await asyncio.sleep(5)
+        left = total_time - int(time.time() - start)
+        if left <= 0:
+            return
+        order = db.get_otp_order(order_id)
+        if not order:
+            return
+            
+        if order['status'] == 'success':
+            try:
+                ui = build_order_ui(order_id, service_name, phone, "Selesai", left, order['otp'])
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id, text=ui,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard(order_id, "Selesai", service_name),
+                )
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception:
+                pass
+        elif order['status'] == 'waiting':
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id,
+                    text=build_order_ui(order_id, service_name, phone, "Menunggu OTP", left),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP", service_name),
+                )
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception:
+                pass
+        else:
+            return
+
+async def poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg_id, total_time):
+    start = time.time()
+    while time.time() - start < total_time:
+        order = db.get_otp_order(order_id)
+        if not order:
+            return
+        if order['status'] != 'waiting':
+            return 
+            
+        res, status = await wahub_client.check_otp(order['token'], timeout=15)
+        if status == 200 and res.get('state') == 'success':
+            otp = res.get('otp')
+            if db.mark_success_if_waiting(order_id, otp):
+                await wahub_client.mark_done(order_id)
+            return
+        await asyncio.sleep(15)
+
+    order = db.get_otp_order(order_id)
+    if order and order['status'] == 'waiting':
+        res, status = await wahub_client.check_otp(order['token'], timeout=15)
+        if status == 200 and res.get('state') == 'success':
+            otp = res.get('otp')
+            if db.mark_success_if_waiting(order_id, otp):
+                await wahub_client.mark_done(order_id)
+            return
+            
+        cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
+        if cxl_status == 200 and db.mark_status_if_waiting(order_id, 'expired'):
+            db.add_saldo(user_id, order['price'], "Refund OTP Timeout")
+            ui = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {order['price']:,} dikembalikan."
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id, text=ui,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard(order_id, "Selesai", service_name),
+                )
+            except Exception:
+                pass
 
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -659,3 +629,83 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
     await q.edit_message_text(
         reply, parse_mode=ParseMode.HTML if is_html else ParseMode.MARKDOWN
     )
+
+async def boostly_cek_single(nomor):
+    phone = nomor
+    if phone.startswith("62"):
+        phone = "0" + phone[2:]
+    for attempt in range(2):
+        async with httpx.AsyncClient(timeout=15) as client:
+            try:
+                r = await client.post(
+                    f"{BOOSTLY_BASE}/api/v1/check",
+                    headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"},
+                    json={"phone": phone},
+                )
+                data = r.json()
+                if data.get("success"):
+                    d = data.get("data", {})
+                    st = (d.get("status") or "").upper()
+                    if st in ("TERDAFTAR", "REGISTERED"):
+                        return {"success": True, "status": "registered", "name": d.get("name")}
+                    if st in ("BELUM TERDAFTAR", "FRESH", "NOT REGISTERED"):
+                        return {"success": True, "status": "fresh", "name": None}
+                return {"success": False, "detail": f"HTTP {r.status_code}", "raw": data}
+            except Exception as e:
+                if attempt == 1:
+                    return {"success": False, "detail": f"Network: {e}", "raw": None}
+                await asyncio.sleep(1)
+    return {"success": False, "detail": "unknown", "raw": None}
+
+
+async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    
+    trxs = db.get_user_transactions(user.id, limit=10)
+    
+    text = "📋 <b>10 Riwayat Transaksi Terakhir</b>\n\n"
+    if not trxs:
+        text += "<i>Belum ada transaksi.</i>"
+    else:
+        import datetime as dtmod
+        for t in trxs:
+            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+            sign = "+" if t['type'] == "IN" else "-"
+            icon = "🟢" if t['type'] == "IN" else "🔴"
+            text += f"{icon} {sign}Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Kembali ke Menu OTP", callback_data="otp_menu_back")]
+    ])
+    
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+async def handle_menu_back_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Hapus pesan lama dan panggil cmd_otp_menu
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    
+    # Bikin fake update biar bisa reuse cmd_otp_menu
+    class FakeMessage:
+        def __init__(self, original_message):
+            self._msg = original_message
+        async def reply_text(self, *args, **kwargs):
+            return await self._msg.reply_text(*args, **kwargs)
+            
+    class FakeUpdate:
+        def __init__(self, original_update):
+            self.effective_user = original_update.effective_user
+            self.effective_chat = original_update.effective_chat
+            self.message = FakeMessage(original_update.callback_query.message)
+            
+    fake_update = FakeUpdate(update)
+    await cmd_otp_menu(fake_update, ctx)
