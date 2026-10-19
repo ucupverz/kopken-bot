@@ -146,6 +146,7 @@ def deduct_saldo(user_id, amount, desc=""):
             return True
 
 def create_otp_order(user_id, order_id, token, phone, service_name, price):
+    order_id = str(order_id)
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
@@ -154,6 +155,7 @@ def create_otp_order(user_id, order_id, token, phone, service_name, price):
             ctx.execute("INSERT OR REPLACE INTO otp_orders(order_id,user_id,token,phone,service_name,price,status) VALUES(?,?,?,?,?,?,'waiting')", (order_id, user_id, token, phone, service_name, price))
 
 def get_otp_order(order_id):
+    order_id = str(order_id)
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
@@ -163,6 +165,7 @@ def get_otp_order(order_id):
             return ctx.execute("SELECT * FROM otp_orders WHERE order_id=?", (order_id,)).fetchone()
 
 def set_order_msg_id(order_id, msg_id):
+    order_id = str(order_id)
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
@@ -171,6 +174,7 @@ def set_order_msg_id(order_id, msg_id):
             ctx.execute("UPDATE otp_orders SET msg_id=? WHERE order_id=?", (msg_id, order_id))
 
 def mark_success_if_waiting(order_id, otp):
+    order_id = str(order_id)
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
@@ -181,6 +185,7 @@ def mark_success_if_waiting(order_id, otp):
             return cur.rowcount == 1
 
 def mark_status_if_waiting(order_id, new_status):
+    order_id = str(order_id)
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
@@ -191,6 +196,7 @@ def mark_status_if_waiting(order_id, new_status):
             return cur.rowcount == 1
 
 def update_otp_order_status(order_id, status, otp=None):
+    order_id = str(order_id)
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
@@ -215,6 +221,7 @@ def get_user_transactions(user_id, limit=10):
 
 def finish_otp_order_and_refund(order_id, user_id, new_status, description):
     """Transition one waiting order and credit its refund exactly once."""
+    order_id = str(order_id)
     if DATABASE_URL:
         with get_conn() as ctx:
             conn, cur = ctx

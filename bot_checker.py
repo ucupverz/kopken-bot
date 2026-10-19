@@ -362,7 +362,7 @@ async def handle_message(update, ctx):
             await update.message.reply_text("❌ Format tombol tidak dikenali.")
             return
         kb_otp = await get_otp_keyboard()
-        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
+        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardMarkup([["📋 Cek Pesanan"], ["🔙 Kembali ke Menu"]], resize_keyboard=True))
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
