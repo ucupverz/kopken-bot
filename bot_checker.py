@@ -4,10 +4,13 @@ import logging
 import random
 import string
 import re
+import time
+import httpx
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Response
 from contextlib import asynccontextmanager
 import uvicorn
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler
@@ -21,7 +24,7 @@ from otp_handlers import (
     cmd_deposit, get_menu_keyboard, handle_cekstatus_callback,
     handle_cek_kopken_callback, handle_order_action_callback, 
     handle_buy_filter_auto_cancel_callback, handle_buy_callback,
-    boostly_cek_single, BIAYA_CEK_FRESH
+    boostly_cek_single, BIAYA_CEK_FRESH, handle_history_callback
 )
 
 from sfood_handlers import (
@@ -40,6 +43,8 @@ from sfood_telemetry import (
 from tarif_handlers import cmd_tarif, cmd_tarif_cek, cmd_tarif_stats
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
+NASKY_BASE = "https://nasky.web.id"
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 DEFAULT_VOC_QUOTA = int(os.getenv("DEFAULT_VOC_QUOTA", "3"))
 WEBHOOK_URL = "https://okezones-bot.up.railway.app"
@@ -49,33 +54,32 @@ logger = logging.getLogger(__name__)
 
 bot_app = None
 
-def is_admin(uid): return uid in ADMIN_IDS
+def is_admin(user_id): return user_id in ADMIN_IDS
 
 def normalize_phone(text):
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
-    if t.startswith("0"):
-        t = "62" + t[1:]
+    if t.startswith("0"): t = "62" + t[1:]
     return t
+
+def format_phone_display(phone_62):
+    if phone_62.startswith("62"): return "0" + phone_62[2:]
+    return phone_62
 
 def is_valid_phone(text):
     t = text.strip().replace("+", "").replace(" ", "").replace("-", "")
-    if not t.isdigit():
-        return False
-    if t.startswith("62"):
-        return 10 <= len(t) <= 15
-    if t.startswith("0"):
-        return 10 <= len(t) <= 14
+    if not t.isdigit(): return False
+    if t.startswith("62"): return 10 <= len(t) <= 15
+    if t.startswith("0"): return 10 <= len(t) <= 14
     return False
 
 def gen_voc_code():
-    return f"VOC-{''.join(random.choices(string.ascii_uppercase + string.digits, k=6))}"
+    chars = string.ascii_uppercase + string.digits
+    return f"VOC-{''.join(random.choices(chars, k=6))}"
 
 def sanitize_voc_input(text):
     t = text.strip().upper().replace(" ", "")
-    if not re.match(r"^[A-Z0-9_-]+$", t):
-        return None
-    if len(t) < 3 or len(t) > 50:
-        return None
+    if not re.match(r"^[A-Z0-9_-]+$", t): return None
+    if len(t) < 3 or len(t) > 50: return None
     return t
 
 def main_keyboard():
@@ -83,7 +87,7 @@ def main_keyboard():
         ["☕ Cek Nomor Kopken", "💰 Cek Balance"],
         ["📱 WhatsApp OTP", "💳 Topup Balance"],
         ["🔑 Redeem Invitation Code"],
-        ["🍔 ShopeeFood", "❓ Bantuan"],
+        ["🍔 ShopeeFood", "❓ Bantuan"]
     ], resize_keyboard=True)
 
 def admin_keyboard():
@@ -93,54 +97,75 @@ def admin_keyboard():
         ["🔑 Redeem Invitation Code"],
         ["🍔 ShopeeFood", "🔧 Admin Panel"],
         ["📥 Topup Log", "🆕 User Baru"],
-        ["❓ Bantuan"],
+        ["❓ Bantuan"]
     ], resize_keyboard=True)
 
 async def bg_check_stuck_orders(app):
     while True:
         await asyncio.sleep(60)
         try:
-            rows = db.get_stuck_waiting_orders(20)
-            for order in rows:
-                oid = order['order_id']
-                uid = order['user_id']
-                price = order['price']
-                res, code = await wahub_client.cancel_order(oid)
-                if not db.mark_status_if_waiting(oid, 'expired'):
-                    continue
-                db.add_saldo(uid, price, "Refund Auto Timeout")
-                try:
-                    await app.bot.send_message(
-                        chat_id=uid,
-                        text=f"⏰ Order <code>{oid}</code> timeout. Balance Rp {price:,} dikembalikan.",
-                        parse_mode=ParseMode.HTML,
-                    )
-                except Exception:
-                    pass
+            with db.get_conn() as conn:
+                cursor = conn.execute("""
+                    SELECT * FROM otp_orders 
+                    WHERE status = 'waiting' 
+                    AND otp IS NULL
+                    AND created_at <= datetime('now', '-20 minutes')
+                """)
+                stuck_orders = cursor.fetchall()
+                
+                for order in stuck_orders:
+                    oid = order['order_id']
+                    uid = order['user_id']
+                    price = order['price']
+                    sname = order['service_name']
+                    
+                    print(f"[CRON] Refund otomatis order {oid} ({sname})")
+                    
+                    await wahub_client.cancel_order(oid)
+                    db.add_saldo(uid, price, f"Refund Auto {sname}")
+                    db.update_otp_order_status(oid, 'expired')
+                    
+                    try:
+                        await app.bot.send_message(
+                            chat_id=uid, 
+                            text=f"⏰ <b>Waktu Habis</b>\n\nOrder <code>{oid}</code> tidak menerima OTP dalam 20 menit. Balance Rp {price:,} otomatis dikembalikan.", 
+                            parse_mode=ParseMode.HTML
+                        )
+                    except Exception:
+                        pass
         except Exception as e:
-            logger.error(f"stuck cron: {e}")
+            print(f"[CRON] Error: {e}")
 
 async def cmd_start(update, ctx):
     user = update.effective_user
     db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
     kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-    balance = u['saldo'] if u else 0
-    await update.message.reply_text(
-        f"Halo {user.first_name}! 👋\n\n💰 Balance: *Rp {balance:,}*\n\n/help untuk bantuan.",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
+    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+    text = (
+        f"Halo {user.first_name}! 👋\n\n"
+        f"☕ *Bot Multi Fungsi*\n\n"
+        f"💰 Balance kamu: *Rp {balance:,}*\n\n"
+        f"Ketik `/help` untuk bantuan."
     )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 async def cmd_help(update, ctx):
-    await update.message.reply_text(
+    text = (
         "📖 *Bantuan*\n\n"
-        "☕ Cek Nomor Kopken — via keyboard\n"
-        "📱 WhatsApp OTP — via keyboard\n"
-        "💳 Topup Balance — via keyboard\n"
-        "🍔 ShopeeFood — /sfood\n\n"
-        "/start /help /balance /sfood",
-        parse_mode=ParseMode.MARKDOWN,
+        "*☕ Cek Nomor Kopken:*\n"
+        "• Klik tombol Cek Nomor Kopken, lalu masukkan nomor HP.\n\n"
+        "*📱 OTP:*\n"
+        "• Klik tombol WhatsApp OTP di keyboard\n\n"
+        "*💳 Topup:*\n"
+        "• Klik tombol Topup Balance untuk isi saldo via QRIS\n\n"
+        "*🍔 ShopeeFood Tracker:*\n"
+        "• Kirim link tracker + label\n"
+        "• `/sfood` — Menu tracker (Termasuk Pantau Kurir & Tarif)\n\n"
+        "*Commands:*\n"
+        "/start, /help, /balance, /sfood"
     )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_balance(update, ctx):
     user = update.effective_user
@@ -148,97 +173,146 @@ async def cmd_balance(update, ctx):
     if not u:
         db.create_user(user.id, user.username or "", user.first_name or "")
         u = db.get_user(user.id)
-    balance = u['saldo'] if u else 0
+    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+    
     trxs = db.get_user_transactions(user.id, limit=10)
-    text = f"💰 *Balance*\n\nSaldo: *Rp {balance:,}*\n\n🧾 *10 Transaksi:*\n"
+    
+    text = f"💰 *Balance Kamu*\n\nSaldo saat ini: *Rp {balance:,}*\n\n"
+    text += "🧾 *10 Transaksi Terakhir:*\n"
+    
     if not trxs:
-        text += "_(kosong)_"
+        text += "_(Belum ada transaksi)_"
     else:
         import datetime as dtmod
         for t in trxs:
             jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-            sign = "+" if t['type'] == "IN" else "-"
-            text += f"{'🟢' if t['type']=='IN' else '🔴'} {sign}Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            if t['type'] == 'IN':
+                text += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            else:
+                text += f"🔴 -Rp {t['amount']:,} | {t['description']} ({jam})\n"
+                
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_message(update, ctx):
     text = (update.message.text or "").strip()
     user = update.effective_user
+
     if not db.get_user(user.id):
         db.create_user(user.id, user.username or "", user.first_name or "")
+    u = db.get_user(user.id)
 
-    if ctx.user_data.get('buy_state') == 'WAITING_QTY':
-        clean = re.sub(r'\D', '', text)
-        if clean:
-            await process_direct_buy(update, ctx, int(clean))
-            return
-
+    if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
+        qty = int(text)
+        await process_direct_buy(update, ctx, qty)
+        return
+        
     if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
-        await process_deposit(update, ctx, int(text))
+        amount = int(text)
+        await process_deposit(update, ctx, amount)
         return
 
     if ctx.user_data.get('cek_kopken_state') == 'WAITING_PHONE':
         ctx.user_data['cek_kopken_state'] = None
         if not is_valid_phone(text):
-            await update.message.reply_text("❌ Format nomor tidak valid.")
+            await update.message.reply_text("❌ Format nomor tidak valid. Silakan coba lagi.")
             return
+        
         phone = normalize_phone(text)
-        msg = await update.message.reply_text("🔍 Mengecek...")
-        reply, is_html = await _do_cek_kopken(user.id, phone)
-        await msg.edit_text(
-            reply, parse_mode=ParseMode.HTML if is_html else ParseMode.MARKDOWN
-        )
+        msg = await update.message.reply_text("🔍 Mengecek nomor Kopken...")
+        
+        trial_tersisa = db.get_trial_kopken(user.id)
+        result = await boostly_cek_single(phone)
+        
+        if not result.get("success"):
+            raw_data = result.get("raw", "Ga ada data")
+            detail_error = result.get("detail", "Ga ada detail")
+            
+            promo_txt = (
+                f"⚠️ <b>Debugging API Boostly</b>\n\n"
+                f"<b>Detail:</b> {detail_error}\n"
+                f"<b>Raw Response:</b>\n<code>{raw_data}</code>\n\n"
+                f"Tolong kirim screenshot ini ke developer."
+            )
+            await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML)
+            return
+            
+        status = result.get("status")
+        
+        if status == "fresh":
+            if trial_tersisa > 0:
+                db.set_trial_kopken(user.id, trial_tersisa - 1)
+                reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n🎁 Kamu menggunakan 1x Free Trial cek. Sisa trial: {trial_tersisa-1}x."
+            else:
+                u = db.get_user(user.id)
+                balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+                if balance < BIAYA_CEK_FRESH:
+                    await msg.edit_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
+                    return
+                db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
+                reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
+                
+        elif status == "registered":
+            reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {result.get('name') or '-'}\n\n💳 Cek GRATIS."
+        else:
+            reply = f"❓ Status tidak dikenal: `{status}`"
+            
+        await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
         return
 
     if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
         await handle_sfood_message(update, ctx)
         return
 
-    simple_map = {
-        "💰 Cek Balance": cmd_balance,
-        "💳 Topup Balance": cmd_deposit,
-        "📱 WhatsApp OTP": cmd_otp_menu,
-        "🍔 ShopeeFood": cmd_sfood,
-        "❓ Bantuan": cmd_help,
-    }
-    if text in simple_map:
-        await simple_map[text](update, ctx)
-        return
-
     if text == "☕ Cek Nomor Kopken":
+        await update.message.reply_text("Silakan kirim nomor HP yang mau dicek.\n\nContoh: `081234567890`", parse_mode=ParseMode.MARKDOWN)
         ctx.user_data['cek_kopken_state'] = 'WAITING_PHONE'
-        await update.message.reply_text(
-            "Kirim nomor HP.\nContoh: `081234567890`", parse_mode=ParseMode.MARKDOWN
-        )
         return
 
+    if text == "💰 Cek Balance":
+        await cmd_balance(update, ctx)
+        return
+
+    if text == "💳 Topup Balance":
+        await cmd_deposit(update, ctx)
+        return
+
+    if text == "📱 WhatsApp OTP":
+        await cmd_otp_menu(update, ctx)
+        return
+        
     if text == "🔑 Redeem Invitation Code":
-        await update.message.reply_text(
-            "Kirim kode VOC.\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("Silakan kirim kode Invitation / VOC kamu.\n\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if text == "🍔 ShopeeFood":
+        await cmd_sfood(update, ctx)
+        return
+
+    if text == "❓ Bantuan":
+        await cmd_help(update, ctx)
         return
 
     if text == "🔧 Admin Panel" and is_admin(user.id):
         await cmd_admin(update, ctx)
         return
-
+        
     if text == "📥 Topup Log" and is_admin(user.id):
         topups = db.get_recent_topups(10)
         if not topups:
             await update.message.reply_text("Belum ada topup.")
             return
-        import datetime as dtmod
         txt = "📥 *10 Topup Terakhir*\n\n"
+        import datetime as dtmod
         for t in topups:
             jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-            txt += f"🟢 Rp {t['amount']:,} | `{t['user_id']}` | {jam}\n"
+            txt += f"🟢 Rp {t['amount']:,} | User: `{t['user_id']}` | {jam}\n"
         await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
         return
 
     if text == "🆕 User Baru" and is_admin(user.id):
         users = db.get_recent_users(10)
-        import datetime as dtmod
         txt = "🆕 *10 User Terbaru*\n\n"
+        import datetime as dtmod
         for u in users:
             jam = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
             uname = f"@{u['username']}" if u['username'] else "(no uname)"
@@ -246,124 +320,70 @@ async def handle_message(update, ctx):
         await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
         return
 
-    if text in ("🔙 Kembali ke Menu", "🔙 Menu Utama"):
-        u = db.get_user(user.id)
+    if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
         kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        await update.message.reply_text(
-            f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {(u['saldo'] if u else 0):,}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=kb,
-        )
+        balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+        await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     if text == "📋 Cek Pesanan":
-        with db.get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM otp_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 1",
-                (user.id,)
-            ).fetchall()
-        if not rows:
-            await update.message.reply_text("❌ Tidak ada pesanan.")
+        last_order = ctx.user_data.get('last_order')
+        if not last_order:
+            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
             return
-        o = rows[0]
-        await update.message.reply_text(
-            f"📋 <b>Pesanan</b>\n\nLayanan: {o['service_name']}\n"
-            f"Nomor: <code>{o['phone']}</code>\nStatus: {o['status']}",
-            parse_mode=ParseMode.HTML,
-        )
+            
+        order_db = db.get_otp_order(last_order['order_id'])
+        if order_db:
+            if order_db['status'] == 'success':
+                status_msg = "Selesai (OTP Diterima)"
+            elif order_db['status'] == 'waiting':
+                status_msg = "Menunggu OTP"
+            else:
+                status_msg = order_db['status']
+        else:
+            status_msg = "Tidak diketahui"
+            
+        msg = f"📋 <b>Detail Pesanan Aktif</b>\n\nLayanan: {last_order['service']}\nNomor: <code>{last_order['phone']}</code>\nStatus: {status_msg}"
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
         return
 
     if text.startswith("🛒 "):
-        m = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
-        if not m:
+        match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
+        service_name = match.group(1).strip() if match else None
+        if not service_name:
             await update.message.reply_text("❌ Format tombol tidak dikenali.")
             return
-        name = m.group(1).strip()
-        ctx.user_data['buy_service'] = name
+        kb_otp = await get_otp_keyboard()
+        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
+        ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
-        await update.message.reply_text(
-            f"Berapa nomor <b>{name}</b>?\n\nKetik angka (contoh: 1)",
-            parse_mode=ParseMode.HTML, reply_markup=await get_otp_menu_keyboard(),
-        )
         return
 
-    if text == "🔙 Balik ke Menu Utama" or text == "🏠 Menu Utama":
-        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        await update.message.reply_text(
-            "🏠 <b>Menu Utama</b>", 
-            parse_mode=ParseMode.HTML, 
-            reply_markup=kb
-        )
-        return
-
-    if text == "📋 Riwayat Pesanan":
-        # Panggil fungsi riwayat
-        from otp_handlers import handle_history_callback
-        
-        # Bikin fake callback query biar bisa reuse fungsi history
-        class FakeQuery:
-            def __init__(self, msg):
-                self.message = msg
-            async def answer(self, *args, **kwargs): pass
-            async def edit_message_text(self, *args, **kwargs): pass # Biar ga error, kirim baru aja
-                
-        class FakeUpdate:
-            def __init__(self, user, msg):
-                self.effective_user = user
-                self.callback_query = FakeQuery(msg)
-                
-        # Kirim pesan history baru (karena ga bisa edit pesan yang ga ada inline button)
-        trxs = db.get_user_transactions(user.id, limit=10)
-        import datetime as dtmod
-        
-        res_text = "📋 <b>10 Riwayat Transaksi Terakhir</b>\n\n"
-        if not trxs:
-            res_text += "<i>Belum ada transaksi.</i>"
+    text_upper = text.upper()
+    if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
+        success, message, quota = db.use_voc(text_upper, user.id)
+        if success:
+            await update.message.reply_text(f"✅ *{message}*\n\nSekarang Balance kamu: *Rp {db.get_user(user.id)['saldo']:,}*.", parse_mode=ParseMode.MARKDOWN)
         else:
-            for t in trxs:
-                jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-                sign = "+" if t['type'] == "IN" else "-"
-                icon = "🟢" if t['type'] == "IN" else "🔴"
-                res_text += f"{icon} {sign}Rp {t['amount']:,} | {t['description']} ({jam})\n"
-                
-        await update.message.reply_text(res_text, parse_mode=ParseMode.HTML)
-        return
-
-    tu = text.upper()
-    if len(tu) >= 3 and re.match(r"^[A-Z0-9_-]+$", tu) and db.get_voc(tu):
-        ok, msg, quota = db.use_voc(tu, user.id)
-        if ok:
-            u = db.get_user(user.id)
-            await update.message.reply_text(
-                f"✅ *{msg}*\n\nBalance: *Rp {(u['saldo'] if u else 0):,}*",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        else:
-            await update.message.reply_text(f"❌ {msg}")
+            await update.message.reply_text(f"❌ {message}")
         return
 
     await update.message.reply_text("❌ Format tidak dikenali.")
 
 async def cmd_admin(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    await update.message.reply_text(
-        f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n\n"
-        "/genvoc /listvoc /revoke /addsaldo /stats /users /userinfo /vocdetail",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n\n*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_genvoc(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     args = ctx.args or []
     if not args:
         for _ in range(10):
             code = gen_voc_code()
             if db.create_voc(code, DEFAULT_VOC_QUOTA, update.effective_user.id):
-                await update.message.reply_text(
-                    f"✅ `{code}` | Rp {DEFAULT_VOC_QUOTA:,}", parse_mode=ParseMode.MARKDOWN
-                )
+                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nIsi Balance: *Rp {DEFAULT_VOC_QUOTA}x*", parse_mode=ParseMode.MARKDOWN)
                 return
         return
     if len(args) == 1 and args[0].isdigit():
@@ -371,153 +391,100 @@ async def cmd_genvoc(update, ctx):
         for _ in range(10):
             code = gen_voc_code()
             if db.create_voc(code, quota, update.effective_user.id):
-                await update.message.reply_text(
-                    f"✅ `{code}` | Rp {quota:,}", parse_mode=ParseMode.MARKDOWN
-                )
+                await update.message.reply_text(f"✅ *Kode VOC dibuat*\n\n`{code}`\n\nIsi Balance: *Rp {quota:,}*", parse_mode=ParseMode.MARKDOWN)
                 return
         return
     if len(args) == 1:
         custom = sanitize_voc_input(args[0])
-        if not custom:
-            await update.message.reply_text("❌ Kode tidak valid.")
-            return
-        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id):
-            await update.message.reply_text(
-                f"✅ `{custom}` | Rp {DEFAULT_VOC_QUOTA:,}", parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await update.message.reply_text(f"❌ `{custom}` sudah ada.")
+        if not custom: await update.message.reply_text("❌ Kode tidak valid."); return
+        if db.create_voc(custom, DEFAULT_VOC_QUOTA, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Balance: Rp {DEFAULT_VOC_QUOTA}x", parse_mode=ParseMode.MARKDOWN)
+        else: await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
         return
     if len(args) >= 2:
         custom = sanitize_voc_input(args[0])
-        if not custom or not args[1].isdigit():
-            await update.message.reply_text("❌ Format: `/genvoc <KODE> <SALDO>`", parse_mode=ParseMode.MARKDOWN)
-            return
+        if not custom or not args[1].isdigit(): await update.message.reply_text("❌ Format: `/genvoc <KODE> <SALDO>`", parse_mode=ParseMode.MARKDOWN); return
         quota = int(args[1])
-        if db.create_voc(custom, quota, update.effective_user.id):
-            await update.message.reply_text(
-                f"✅ `{custom}` | Rp {quota:,}", parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await update.message.reply_text(f"❌ `{custom}` sudah ada.")
+        if db.create_voc(custom, quota, update.effective_user.id): await update.message.reply_text(f"✅ Kode: `{custom}` Balance: Rp {quota:,}", parse_mode=ParseMode.MARKDOWN)
+        else: await update.message.reply_text(f"❌ Kode `{custom}` sudah ada.")
 
 async def cmd_listvoc(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     rows = db.list_voc_codes(20)
-    if not rows:
-        await update.message.reply_text("Kosong.")
-        return
-    lines = ["🔑 *20 VOC Terakhir*\n"]
+    if not rows: await update.message.reply_text("Belum ada kode VOC."); return
+    lines = ["🔑 *20 Kode VOC Terakhir*\n"]
     for r in rows:
-        st = "🟢" if r["active"] else "🔴"
-        lines.append(f"{st} `{r['code']}` — Rp {r['quota']:,}")
+        status = "🟢" if r["active"] else "🔴"
+        lines.append(f"{status} `{r['code']}` — Rp {r['quota']:,}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_revoke(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/revoke <kode>`", parse_mode=ParseMode.MARKDOWN)
-        return
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Usage: `/revoke <kode>`", parse_mode=ParseMode.MARKDOWN); return
     db.revoke_voc(ctx.args[0].upper())
-    await update.message.reply_text(f"✅ `{ctx.args[0].upper()}` dinonaktifkan.", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ Kode `{ctx.args[0].upper()}` dinonaktifkan.", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_addsaldo(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(ctx.args) < 2:
-        await update.message.reply_text("Usage: `/addsaldo <id> <n>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0]); amt = int(ctx.args[1])
-    except ValueError:
-        return
-    if not db.get_user(uid):
-        await update.message.reply_text("❌ User tidak ada.")
-        return
-    db.add_saldo(uid, amt, "Admin Add Saldo")
-    u = db.get_user(uid)
-    await update.message.reply_text(
-        f"✅ `{uid}` +{amt}. Total Rp {u['saldo']:,}", parse_mode=ParseMode.MARKDOWN
-    )
+    if not is_admin(update.effective_user.id): return
+    if len(ctx.args) < 2: await update.message.reply_text("Usage: `/addsaldo <id> <n>`", parse_mode=ParseMode.MARKDOWN); return
+    try: uid = int(ctx.args[0]); amt = int(ctx.args[1])
+    except ValueError: return
+    if not db.get_user(uid): await update.message.reply_text("❌ User tidak ditemukan."); return
+    db.add_saldo(uid, amt, f"Admin Add Saldo")
+    new_s = db.get_user(uid)["saldo"]
+    await update.message.reply_text(f"✅ Saldo user `{uid}` +{amt}. Total: Rp {new_s:,}", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_stats(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     s = db.get_stats()
-    await update.message.reply_text(
-        f"📊 Users: {s['total_users']} | Cek: {s['total_cek']}", parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text(f"📊 *Statistik*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_users(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    users = db.list_all_users(50)
-    if not users:
-        await update.message.reply_text("Kosong.")
-        return
+    if not is_admin(update.effective_user.id): return
+    users = db.list_all_users(limit=50)
+    if not users: await update.message.reply_text("Belum ada user."); return
     import datetime as dtmod
-    lines = [f"👥 *{len(users)} User*\n"]
+    lines = [f"👥 *Total Users: {len(users)}*\n"]
     for u in users:
-        uname = f"@{u['username']}" if u['username'] else "-"
+        uname = f"@{u['username']}" if u['username'] else "(no uname)"
+        name = u['first_name'] or "(no name)"
         dt = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
-        lines.append(f"• {u['first_name']} {uname} | `{u['user_id']}` | Rp {u['saldo']:,} | {dt}")
+        saldo = u['saldo'] if u and 'saldo' in u.keys() else 0
+        lines.append(f"• {name} {uname}\n  ID: `{u['user_id']}` | Balance: Rp {saldo:,} | {dt}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_userinfo(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/userinfo <id>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    try:
-        uid = int(ctx.args[0])
-    except ValueError:
-        return
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Usage: `/userinfo <id>`", parse_mode=ParseMode.MARKDOWN); return
+    try: uid = int(ctx.args[0])
+    except ValueError: return
     user, vocs = db.get_user_detail(uid)
-    if not user:
-        await update.message.reply_text(f"❌ `{uid}` tidak ada.")
-        return
+    if not user: await update.message.reply_text(f"❌ User `{uid}` tidak ditemukan."); return
     import datetime as dtmod
     dt = dtmod.datetime.fromtimestamp(user['created_at']).strftime("%d/%m/%Y %H:%M")
-    uname = f"@{user['username']}" if user['username'] else "-"
-    txt = (
-        f"👤 `{user['user_id']}`\nUsername: {uname}\nNama: {user['first_name'] or '-'}\n"
-        f"💰 Rp {user['saldo']:,}\n📅 {dt}\n"
-    )
+    uname = f"@{user['username']}" if user['username'] else "(no uname)"
+    saldo = user['saldo'] if user and 'saldo' in user.keys() else 0
+    text = f"👤 *Detail User*\n\nID: `{user['user_id']}`\nUsername: {uname}\nNama: {user['first_name'] or '-'}\n\n💰 Balance: *Rp {saldo:,}*\n📅 Daftar: {dt}\n\n"
     if vocs:
-        txt += f"\n🔑 VOC dipakai ({len(vocs)}):\n"
-        for v in vocs:
-            txt += f"• `{v['code']}` Rp {v['quota']:,}\n"
-    else:
-        txt += "\n🔑 Belum redeem VOC."
-    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        text += f"🔑 *VOC dipakai ({len(vocs)}):*\n"
+        for v in vocs: text += f"• `{v['code']}` — Rp {v['quota']:,}\n"
+    else: text += "🔑 Belum pernah redeem VOC."
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_vocdetail(update, ctx):
-    if not is_admin(update.effective_user.id):
-        return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/vocdetail <kode>`", parse_mode=ParseMode.MARKDOWN)
-        return
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args: await update.message.reply_text("Usage: `/vocdetail <kode>`", parse_mode=ParseMode.MARKDOWN); return
     code = ctx.args[0].upper()
     voc, user = db.get_voc_detail(code)
-    if not voc:
-        await update.message.reply_text(f"❌ `{code}` tidak ada.")
-        return
+    if not voc: await update.message.reply_text(f"❌ Kode `{code}` tidak ditemukan."); return
     import datetime as dtmod
     dt = dtmod.datetime.fromtimestamp(voc['created_at']).strftime("%d/%m/%Y %H:%M")
-    txt = (
-        f"🔑 `{voc['code']}`\nRp {voc['quota']:,}\nDibuat: {dt}\n"
-        f"Status: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n"
-    )
+    text = f"🔑 *Detail Kode VOC*\n\nKode: `{voc['code']}`\nBalance: Rp {voc['quota']:,}\nDibuat: {dt}\nStatus: {'🟢 Aktif' if voc['active'] else '🔴 Terpakai'}\n\n"
     if user:
-        used = dtmod.datetime.fromtimestamp(voc['used_at']).strftime("%d/%m/%Y %H:%M") if voc['used_at'] else "-"
-        uname = f"@{user['username']}" if user['username'] else "-"
-        txt += f"\n👤 {user['first_name'] or '-'} {uname}\n`{user['user_id']}`\nRedeem: {used}"
-    else:
-        txt += "\n👤 Belum dipakai."
-    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+        used_at = dtmod.datetime.fromtimestamp(voc['used_at']).strftime("%d/%m/%Y %H:%M") if voc['used_at'] else "-"
+        uname = f"@{user['username']}" if user['username'] else "(no uname)"
+        text += f"👤 *Dipakai oleh:*\nNama: {user['first_name'] or '-'}\nUsername: {uname}\nUser ID: `{user['user_id']}`\nRedeem: {used_at}"
+    else: text += "👤 Belum dipakai siapa pun."
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
@@ -528,9 +495,13 @@ async def lifespan(app: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram-webhook", drop_pending_updates=True)
-    logger.info(f"[TG] webhook set: {WEBHOOK_URL}/telegram-webhook")
+    print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
+    
     asyncio.create_task(tracker_worker(bot_app.bot))
+    print("[SFOOD] Tracker worker started")
+    
     asyncio.create_task(bg_check_stuck_orders(bot_app))
+    print("[CRON] Background refunder started")
     yield
     await bot_app.stop()
     await bot_app.shutdown()
@@ -547,47 +518,39 @@ async def telegram_webhook(request: Request):
 @api_app.post("/wahub-webhook")
 async def wahub_webhook(request: Request):
     data = await request.json()
-    order_id = str(data.get('order_id') or "")
+    print(f"[WEBHOOK] Menerima data: {data}")
+    order_id = str(data.get('order_id'))
     otp = data.get('otp')
     if order_id and otp:
         asyncio.create_task(process_webhook_otp(order_id, otp))
-        return {"status": "ok"}
+        return {"status": "success"}
     return {"status": "ignored"}
 
 async def process_webhook_otp(order_id, otp):
     order = db.get_otp_order(order_id)
-    if not order or order['status'] != 'waiting':
+    if not order:
+        print(f"[WEBHOOK] Order {order_id} tidak ada di DB.")
         return
-    if not db.mark_success_if_waiting(order_id, otp):
-        return
+    db.update_otp_order_status(order_id, 'success', otp)
     chat_id = order['user_id']
-    text = build_order_ui(
-        order_id, order['service_name'], order['phone'], "Selesai", 1200, otp
+    ui_text = (
+        f"✅ <b>Pesanan Selesai</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Order ID: <code>{order_id}</code>\n"
+        f"📱 Layanan: {order['service_name']}\n"
+        f"🔑 Kode OTP: <code>{otp}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
     )
-    msg_id = order['msg_id']
-    if msg_id:
-        try:
-            await bot_app.bot.edit_message_text(
-                chat_id=chat_id, message_id=msg_id, text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-            )
-            return
-        except Exception:
-            pass
-    await bot_app.bot.send_message(
-        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
-        reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-    )
+    await bot_app.bot.send_message(chat_id=chat_id, text=ui_text, parse_mode=ParseMode.HTML)
 
 def main():
     global bot_app
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN kosong")
-        return
+        print("❌ BOT_TOKEN belum di-set"); return
     db.init_db()
     bot_app = Application.builder().token(BOT_TOKEN).build()
-
+    
     bot_app.add_handler(CommandHandler("start", cmd_start))
     bot_app.add_handler(CommandHandler("help", cmd_help))
     bot_app.add_handler(CommandHandler("balance", cmd_balance))
@@ -617,18 +580,21 @@ def main():
     bot_app.add_handler(CommandHandler("users", cmd_users))
     bot_app.add_handler(CommandHandler("userinfo", cmd_userinfo))
     bot_app.add_handler(CommandHandler("vocdetail", cmd_vocdetail))
-
-    bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus\|"))
-    bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act\|"))
-    bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken\|"))
-    bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy\|"))
+    
+    bot_app.add_handler(CallbackQueryHandler(handle_cekstatus_callback, pattern=r"^cekstatus_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_order_action_callback, pattern=r"^otp_act_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_buy_filter_auto_cancel_callback, pattern=r"^otp_buyfilter_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
+    
+    # Daftarin handler history yang sebelumnya error
+    from otp_handlers import handle_history_callback
     bot_app.add_handler(CallbackQueryHandler(handle_history_callback, pattern=r"^otp_history$"))
-    bot_app.add_handler(CallbackQueryHandler(handle_menu_back_callback, pattern=r"^otp_menu_back$"))
-
+    
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    bot_app.add_error_handler(error_handler)
-
+    
+    print("🌐 Web Server (FastAPI) jalan di port 8080")
     uvicorn.run(api_app, host="0.0.0.0", port=8080, log_level="info")
 
 if __name__ == "__main__":
