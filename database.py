@@ -117,8 +117,11 @@ def add_saldo(user_id, amount, desc=""):
         else:
             ctx.execute("BEGIN IMMEDIATE")
             cur = ctx.execute("UPDATE users SET saldo = saldo + ? WHERE user_id=?", (amount, user_id))
-            if cur.rowcount == 0: return False
+            if cur.rowcount == 0:
+                ctx.rollback()
+                return False
             ctx.execute("INSERT INTO transactions(user_id,type,amount,description) VALUES(?,?,?,?)", (user_id, 'IN', amount, desc))
+            ctx.commit()
             return True
 
 def deduct_saldo(user_id, amount, desc=""):
@@ -135,8 +138,11 @@ def deduct_saldo(user_id, amount, desc=""):
         else:
             ctx.execute("BEGIN IMMEDIATE")
             cur = ctx.execute("UPDATE users SET saldo = saldo - ? WHERE user_id=? AND saldo >= ?", (amount, user_id, amount))
-            if cur.rowcount == 0: return False
+            if cur.rowcount == 0:
+                ctx.rollback()
+                return False
             ctx.execute("INSERT INTO transactions(user_id,type,amount,description) VALUES(?,?,?,?)", (user_id, 'OUT', amount, desc))
+            ctx.commit()
             return True
 
 def create_otp_order(user_id, order_id, token, phone, service_name, price):
@@ -206,6 +212,68 @@ def get_user_transactions(user_id, limit=10):
             return cur.fetchall()
         else:
             return ctx.execute("SELECT * FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+
+def finish_otp_order_and_refund(order_id, user_id, new_status, description):
+    """Transition one waiting order and credit its refund exactly once."""
+    if DATABASE_URL:
+        with get_conn() as ctx:
+            conn, cur = ctx
+            cur.execute(
+                "UPDATE otp_orders SET status=%s "
+                "WHERE order_id=%s AND user_id=%s AND status='waiting' RETURNING price",
+                (new_status, order_id, user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False, 0
+            amount = max(0, int(row['price'] or 0))
+            if amount:
+                cur.execute("UPDATE users SET saldo = saldo + %s WHERE user_id=%s", (amount, user_id))
+                if cur.rowcount != 1:
+                    raise RuntimeError(f"User {user_id} tidak ditemukan saat refund order {order_id}")
+                cur.execute(
+                    "INSERT INTO transactions(user_id,type,amount,description) VALUES(%s,%s,%s,%s)",
+                    (user_id, 'IN', amount, description),
+                )
+            return True, amount
+
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT price FROM otp_orders WHERE order_id=? AND user_id=? AND status='waiting'",
+                (order_id, user_id),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return False, 0
+
+            cur = conn.execute(
+                "UPDATE otp_orders SET status=? "
+                "WHERE order_id=? AND user_id=? AND status='waiting'",
+                (new_status, order_id, user_id),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False, 0
+
+            amount = max(0, int(row['price'] or 0))
+            if amount:
+                cur = conn.execute(
+                    "UPDATE users SET saldo=saldo+? WHERE user_id=?", (amount, user_id)
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError(f"User {user_id} tidak ditemukan saat refund order {order_id}")
+                conn.execute(
+                    "INSERT INTO transactions(user_id,type,amount,description) VALUES(?,?,?,?)",
+                    (user_id, 'IN', amount, description),
+                )
+            conn.commit()
+            return True, amount
+        except Exception:
+            conn.rollback()
+            raise
+
 
 def get_stuck_waiting_orders(minutes=20):
     with get_conn() as ctx:

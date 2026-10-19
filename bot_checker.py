@@ -104,37 +104,43 @@ async def bg_check_stuck_orders(app):
     while True:
         await asyncio.sleep(60)
         try:
-            with db.get_conn() as conn:
-                cursor = conn.execute("""
-                    SELECT * FROM otp_orders 
-                    WHERE status = 'waiting' 
-                    AND otp IS NULL
-                    AND created_at <= datetime('now', '-20 minutes')
-                """)
-                stuck_orders = cursor.fetchall()
-                
-                for order in stuck_orders:
-                    oid = order['order_id']
-                    uid = order['user_id']
-                    price = order['price']
-                    sname = order['service_name']
-                    
-                    print(f"[CRON] Refund otomatis order {oid} ({sname})")
-                    
-                    await wahub_client.cancel_order(oid)
-                    db.add_saldo(uid, price, f"Refund Auto {sname}")
-                    db.update_otp_order_status(oid, 'expired')
-                    
-                    try:
-                        await app.bot.send_message(
-                            chat_id=uid, 
-                            text=f"⏰ <b>Waktu Habis</b>\n\nOrder <code>{oid}</code> tidak menerima OTP dalam 20 menit. Balance Rp {price:,} otomatis dikembalikan.", 
-                            parse_mode=ParseMode.HTML
-                        )
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[CRON] Error: {e}")
+            stuck_orders = db.get_stuck_waiting_orders(minutes=20)
+            for order in stuck_orders:
+                oid = order['order_id']
+                uid = order['user_id']
+                sname = order['service_name'] or "OTP"
+                try:
+                    _, code = await asyncio.wait_for(
+                        wahub_client.cancel_order(oid), timeout=25
+                    )
+                except Exception as exc:
+                    logger.warning("[CRON] Batal order %s gagal: %s", oid, exc)
+                    continue
+
+                if code != 200:
+                    logger.warning("[CRON] Provider belum mengonfirmasi batal order %s (HTTP %s)", oid, code)
+                    continue
+
+                changed, price = db.finish_otp_order_and_refund(
+                    oid, uid, 'expired', f"Refund Auto {sname}"
+                )
+                if not changed:
+                    continue
+
+                logger.info("[CRON] Refund otomatis order %s (%s)", oid, sname)
+                try:
+                    await app.bot.send_message(
+                        chat_id=uid,
+                        text=(
+                            f"⏰ <b>Waktu Habis</b>\n\nOrder <code>{oid}</code> "
+                            f"tidak menerima OTP. Balance Rp {price:,} otomatis dikembalikan."
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception as exc:
+                    logger.warning("[CRON] Gagal mengirim notifikasi order %s: %s", oid, exc)
+        except Exception as exc:
+            logger.exception("[CRON] Gagal memeriksa order OTP: %s", exc)
 
 async def cmd_start(update, ctx):
     user = update.effective_user
