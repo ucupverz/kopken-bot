@@ -28,11 +28,18 @@ MAP_DISPLAY = {
 MAP_BACK = {v.lower(): k for k, v in MAP_DISPLAY.items()}
 CALLBACK_SEP = "|"
 
+# --- KEYBOARDS ---
 def get_otp_menu_keyboard():
     return ReplyKeyboardMarkup([
-        ["🔙 Balik ke Menu Utama"]
+        ["📋 Riwayat Pesanan", "🔙 Balik ke Menu Utama"]
     ], resize_keyboard=True)
 
+def get_back_menu_keyboard():
+    return ReplyKeyboardMarkup([
+        ["📋 Riwayat Pesanan", "🏠 Menu Utama"]
+    ], resize_keyboard=True)
+
+# --- UI MENU OTP ---
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = db.get_user(user.id)
@@ -63,7 +70,6 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 callback_data="otp_none"
             )])
             
-    # Tambahin tombol Riwayat di paling bawah
     keyboard.append([InlineKeyboardButton("📋 Riwayat Pesanan", callback_data="otp_history")])
     inline_kb = InlineKeyboardMarkup(keyboard)
 
@@ -73,15 +79,8 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Silakan pilih layanan di bawah ini:"
     )
     
-    await update.message.reply_text(
-        text, 
-        parse_mode=ParseMode.HTML, 
-        reply_markup=inline_kb
-    )
-    await update.message.reply_text(
-        "⬇️ Gunakan tombol di bawah untuk kembali.", 
-        reply_markup=get_otp_menu_keyboard()
-    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=inline_kb)
+    await update.message.reply_text("⬇️ Gunakan tombol di bawah untuk kembali.", reply_markup=get_otp_menu_keyboard())
 
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -104,10 +103,10 @@ async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     await query.message.reply_text(
         f"Berapa nomor <b>{name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)",
-        parse_mode=ParseMode.HTML,
-        reply_markup=ReplyKeyboardRemove()
+        parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove()
     )
 
+# --- PROSES BELI ---
 async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
     user = update.effective_user
     if qty < 1:
@@ -130,9 +129,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             await update.message.reply_text("❌ Layanan tidak ditemukan.")
             return
         if target['stock'] < qty:
-            await update.message.reply_text(
-                f"❌ Stok {display_name} tidak cukup (Sisa: {target['stock']})."
-            )
+            await update.message.reply_text(f"❌ Stok {display_name} tidak cukup (Sisa: {target['stock']}).")
             return
 
         harga = target['price'] + MARGIN
@@ -141,17 +138,13 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         u = db.get_user(user.id)
         if (u['saldo'] if u else 0) < total:
             await update.message.reply_text(
-                f"💰 Balance: Rp {(u['saldo'] if u else 0):,}\n"
-                f"💸 Butuh: Rp {total:,}\n\n"
-                "❌ Balance tidak cukup.",
+                f"💰 Balance: Rp {(u['saldo'] if u else 0):,}\n💸 Butuh: Rp {total:,}\n\n❌ Balance tidak cukup.",
                 parse_mode=ParseMode.HTML,
             )
             ctx.user_data['buy_qty'] = qty
             ctx.user_data['buy_total'] = total
             ctx.user_data['buy_id'] = target['id']
-            asyncio.create_task(process_qris_payment(
-                ctx.bot, update.effective_chat.id, user.id, total, ctx, is_direct_buy=True
-            ))
+            asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, user.id, total, ctx, is_direct_buy=True))
             return
 
         await update.message.reply_text("⏳ Membuat pesanan...")
@@ -171,11 +164,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 bought.append((oid, token, phone))
             else:
                 err = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
-                await update.message.reply_text(
-                    f"❌ Gagal pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err}</code>\n\n"
-                    "Silakan coba beberapa saat lagi.",
-                    parse_mode=ParseMode.HTML,
-                )
+                await update.message.reply_text(f"❌ Gagal pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err}</code>\n\nSilakan coba beberapa saat lagi.", parse_mode=ParseMode.HTML)
                 break
 
         if not bought:
@@ -184,27 +173,18 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         for idx, (oid, token, phone) in enumerate(bought):
             if idx > 0:
                 await asyncio.sleep(2)
-            await send_order_ui(
-                ctx.bot, update.effective_chat.id, oid, display_name, phone, user.id
-            )
+            await send_order_ui(ctx.bot, update.effective_chat.id, oid, display_name, phone, user.id)
 
         if "kopken" in api_name.lower() and "filter" not in api_name.lower():
             ph0 = bought[0][2]
-            promo = (
-                f"💡 Nomor <code>{ph0}</code> siap. Mau cek status Kopkennya sekarang?\n"
-                "*(2x Free Trial cek gratis)*"
-            )
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken{CALLBACK_SEP}{ph0}")
-            ]])
-            await ctx.bot.send_message(
-                chat_id=update.effective_chat.id, text=promo,
-                parse_mode=ParseMode.HTML, reply_markup=kb,
-            )
+            promo = f"💡 Nomor <code>{ph0}</code> siap. Mau cek status Kopkennya sekarang?\n*(2x Free Trial cek gratis)*"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken{CALLBACK_SEP}{ph0}")]])
+            await ctx.bot.send_message(chat_id=update.effective_chat.id, text=promo, parse_mode=ParseMode.HTML, reply_markup=kb)
     finally:
         ctx.user_data['buy_state'] = None
         ctx.user_data['is_processing'] = False
 
+# --- UI PESANAN & TIMER ---
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = max(time_left, 0) // 60
     detik = max(time_left, 0) % 60
@@ -241,23 +221,17 @@ def get_order_inline_keyboard(order_id, status="Menunggu OTP", service_name=""):
             ],
             [
                 InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
-            ],
+            ]
         ])
     
-    # Tampilan setelah selesai / OTP masuk
-    kb = []
-    # Cari ID layanan buat callback beli lagi
-    s_id = "0"
-    if service_name:
-        api_name = MAP_BACK.get(service_name.lower(), service_name.lower())
-        # Ini trick simpel, kirim callback buat buka menu OTP lagi
-        kb.append([InlineKeyboardButton("🛒 Beli Lagi", callback_data="otp_menu_back")])
-    
-    kb.append([
-        InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
-        InlineKeyboardButton("✅ Selesai", callback_data=f"otp_act{CALLBACK_SEP}selesai{CALLBACK_SEP}{order_id}"),
-    ])
-    kb.append([InlineKeyboardButton("🔙 Menu Utama", callback_data="otp_menu_back")])
+    kb = [
+        [InlineKeyboardButton("🛒 Beli Lagi", callback_data="otp_menu_back")],
+        [
+            InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act{CALLBACK_SEP}resend{CALLBACK_SEP}{order_id}"),
+            InlineKeyboardButton("✅ Selesai", callback_data=f"otp_act{CALLBACK_SEP}selesai{CALLBACK_SEP}{order_id}"),
+        ],
+        [InlineKeyboardButton("🔙 Menu Utama", callback_data="otp_menu_back")]
+    ]
     return InlineKeyboardMarkup(kb)
 
 async def send_order_ui(bot, chat_id, order_id, service_name, phone, user_id, total_time=1200):
@@ -290,8 +264,6 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_order_inline_keyboard(order_id, "Selesai", service_name),
                 )
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
             except Exception:
                 pass
         elif order['status'] == 'waiting':
@@ -302,8 +274,6 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP", service_name),
                 )
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
             except Exception:
                 pass
         else:
@@ -313,9 +283,7 @@ async def poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg_
     start = time.time()
     while time.time() - start < total_time:
         order = db.get_otp_order(order_id)
-        if not order:
-            return
-        if order['status'] != 'waiting':
+        if not order or order['status'] != 'waiting':
             return 
             
         res, status = await wahub_client.check_otp(order['token'], timeout=15)
@@ -345,9 +313,11 @@ async def poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg_
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_order_inline_keyboard(order_id, "Selesai", service_name),
                 )
+                await bot.send_message(chat_id, "⬇️", reply_markup=get_back_menu_keyboard())
             except Exception:
                 pass
 
+# --- CALLBACK HANDLERS ---
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -363,6 +333,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             await query.delete_message()
         except Exception:
             pass
+        await query.message.reply_text("Pesanan ditutup.", reply_markup=get_back_menu_keyboard())
         return
 
     if not order:
@@ -381,13 +352,12 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         if code == 200 and db.mark_status_if_waiting(order_id, 'cancelled'):
             db.add_saldo(user.id, order['price'], "Refund Batal Pesanan")
             try:
-                await query.edit_message_text(
-                    f"✅ Dibatalkan. Balance Rp {order['price']:,} dikembalikan."
-                )
+                await query.edit_message_text(f"✅ Dibatalkan. Balance Rp {order['price']:,} dikembalikan.")
             except Exception:
-                await query.message.reply_text(
-                    f"✅ Dibatalkan. Balance Rp {order['price']:,} dikembalikan."
-                )
+                await query.message.reply_text(f"✅ Dibatalkan. Balance Rp {order['price']:,} dikembalikan.")
+            
+            # Munculin keyboard bawah buat balik
+            await query.message.reply_text("⬇️", reply_markup=get_back_menu_keyboard())
         else:
             await query.message.reply_text("❌ Gagal membatalkan pesanan.")
         return
@@ -432,10 +402,7 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     res, code = await wahub_client.rent_number(target['id'])
     if code != 200 or not res.get('order_id'):
         err = res.get('message') or res.get('error') or "unknown"
-        await query.message.reply_text(
-            f"❌ Gagal nomor baru: <code>{err}</code>. Balance lama sudah dikembalikan.",
-            parse_mode=ParseMode.HTML,
-        )
+        await query.message.reply_text(f"❌ Gagal nomor baru: <code>{err}</code>. Balance lama sudah dikembalikan.", parse_mode=ParseMode.HTML)
         return
 
     new_oid = str(res['order_id'])
@@ -454,28 +421,62 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    await send_order_ui(
-        ctx.bot, user.id, new_oid, display_name, new_phone, user.id
-    )
+    await send_order_ui(ctx.bot, user.id, new_oid, display_name, new_phone, user.id)
 
     if "kopken" in api_name.lower() and "filter" not in api_name.lower():
-        promo = (
-            f"💡 Nomor <code>{new_phone}</code> siap.\n"
-            "*(2x Free Trial cek gratis)*"
-        )
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken{CALLBACK_SEP}{new_phone}")
-        ]])
-        await ctx.bot.send_message(
-            chat_id=user.id, text=promo, parse_mode=ParseMode.HTML, reply_markup=kb
-        )
+        promo = f"💡 Nomor <code>{new_phone}</code> siap.\n*(2x Free Trial cek gratis)*"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken{CALLBACK_SEP}{new_phone}")]])
+        await ctx.bot.send_message(chat_id=user.id, text=promo, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    trxs = db.get_user_transactions(user.id, limit=10)
+    
+    text = "📋 <b>10 Riwayat Transaksi Terakhir</b>\n\n"
+    if not trxs:
+        text += "<i>Belum ada transaksi.</i>"
+    else:
+        import datetime as dtmod
+        for t in trxs:
+            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+            sign = "+" if t['type'] == "IN" else "-"
+            icon = "🟢" if t['type'] == "IN" else "🔴"
+            text += f"{icon} {sign}Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Menu OTP", callback_data="otp_menu_back")]])
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+
+async def handle_menu_back_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    
+    class FakeMessage:
+        def __init__(self, original_message):
+            self._msg = original_message
+        async def reply_text(self, *args, **kwargs):
+            return await self._msg.reply_text(*args, **kwargs)
+            
+    class FakeUpdate:
+        def __init__(self, original_update):
+            self.effective_user = original_update.effective_user
+            self.effective_chat = original_update.effective_chat
+            self.message = FakeMessage(original_update.callback_query.message)
+            
+    fake_update = FakeUpdate(update)
+    await cmd_otp_menu(fake_update, ctx)
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['deposit_state'] = 'WAITING_AMOUNT'
-    await update.message.reply_text(
-        "💰 <b>Deposit</b>\n\nMinimal Rp 5.000.\nKetik jumlah (contoh: 10000):",
-        parse_mode=ParseMode.HTML,
-    )
+    await update.message.reply_text("💰 <b>Deposit</b>\n\nMinimal Rp 5.000.\nKetik jumlah (contoh: 10000):", parse_mode=ParseMode.HTML)
 
 async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount: int):
     if amount < 5000:
@@ -483,9 +484,7 @@ async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount
         return
     ctx.user_data['deposit_state'] = None
     await update.message.reply_text(f"⏳ Memproses QRIS Rp {amount:,}...")
-    asyncio.create_task(process_qris_payment(
-        ctx.bot, update.effective_chat.id, update.effective_user.id, amount, ctx, is_direct_buy=False
-    ))
+    asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, update.effective_user.id, amount, ctx, is_direct_buy=False))
 
 async def process_qris_payment(bot, chat_id, user_id, amount, ctx, is_direct_buy=False):
     status, result = await dehuyz_automation.request_qris(amount)
@@ -497,23 +496,14 @@ async def process_qris_payment(bot, chat_id, user_id, amount, ctx, is_direct_buy
     caption = result["caption"]
     qris_msg_id = result["msg_id"]
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus{CALLBACK_SEP}{amount}")
-    ]])
-    qris_msg = await bot.send_photo(
-        chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"),
-        caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb,
-    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus{CALLBACK_SEP}{amount}")]])
+    qris_msg = await bot.send_photo(chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"), caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     async def bg():
         paid = await dehuyz_automation.wait_for_payment(amount, qris_msg_id)
         if paid == "success":
             try:
-                await bot.edit_message_caption(
-                    chat_id=chat_id, message_id=qris_msg.message_id,
-                    caption=f"✅ <b>Pembayaran Rp {amount:,} diterima.</b>",
-                    parse_mode=ParseMode.HTML, reply_markup=None,
-                )
+                await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"✅ <b>Pembayaran Rp {amount:,} diterima.</b>", parse_mode=ParseMode.HTML, reply_markup=None)
             except Exception:
                 pass
 
@@ -537,25 +527,18 @@ async def process_qris_payment(bot, chat_id, user_id, amount, ctx, is_direct_buy
                         bought.append((oid, token, phone))
                     else:
                         err = res.get('message') or res.get('error') or "unknown"
-                        await bot.send_message(
-                            chat_id, f"❌ Gagal sewa nomor: <code>{err}</code>",
-                            parse_mode=ParseMode.HTML,
-                        )
+                        await bot.send_message(chat_id, f"❌ Gagal sewa nomor: <code>{err}</code>", parse_mode=ParseMode.HTML)
                         break
 
                 if not bought:
                     db.add_saldo(user_id, amount, "Refund Gagal Order QRIS")
-                    await bot.send_message(
-                        chat_id, f"💰 Balance Rp {amount:,} dikembalikan."
-                    )
+                    await bot.send_message(chat_id, f"💰 Balance Rp {amount:,} dikembalikan.", reply_markup=get_back_menu_keyboard())
                     return
 
                 for idx, (oid, token, phone) in enumerate(bought):
                     if idx > 0:
                         await asyncio.sleep(2)
-                    await send_order_ui(
-                        bot, chat_id, oid, display_name, phone, user_id
-                    )
+                    await send_order_ui(bot, chat_id, oid, display_name, phone, user_id)
 
                 sisa = amount - harga_satuan * len(bought)
                 if sisa > 0:
@@ -563,17 +546,10 @@ async def process_qris_payment(bot, chat_id, user_id, amount, ctx, is_direct_buy
             else:
                 db.add_saldo(user_id, amount, f"Topup QRIS Rp {amount:,}")
                 u = db.get_user(user_id)
-                await bot.send_message(
-                    chat_id,
-                    f"✅ Deposit berhasil. Balance: Rp {(u['saldo'] if u else 0):,}",
-                )
+                await bot.send_message(chat_id, f"✅ Deposit berhasil. Balance: Rp {(u['saldo'] if u else 0):,}", reply_markup=get_back_menu_keyboard())
         elif paid == "timeout":
             try:
-                await bot.edit_message_caption(
-                    chat_id=chat_id, message_id=qris_msg.message_id,
-                    caption="❌ <b>QRIS Kadaluarsa</b>",
-                    parse_mode=ParseMode.HTML, reply_markup=None,
-                )
+                await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption="❌ <b>QRIS Kadaluarsa</b>", parse_mode=ParseMode.HTML, reply_markup=None)
             except Exception:
                 pass
 
@@ -587,35 +563,19 @@ async def _do_cek_kopken(user_id, phone):
     trial = db.get_trial_kopken(user_id)
     result = await boostly_cek_single(phone)
     if not result.get("success"):
-        return (
-            "⚠️ <b>Gagal cek API</b>\n\n"
-            f"Detail: {result.get('detail')}\n"
-            f"Raw: <code>{result.get('raw')}</code>",
-            True,
-        )
+        return (f"⚠️ <b>Gagal cek API</b>\n\nDetail: {result.get('detail')}\nRaw: <code>{result.get('raw')}</code>", True)
     st = result.get("status")
     if st == "fresh":
         if trial > 0:
             db.set_trial_kopken(user_id, trial - 1)
-            return (
-                f"❌ <code>{phone}</code> BELUM TERDAFTAR (FRESH).\n"
-                f"🎁 Free trial dipakai. Sisa: {trial-1}x.",
-                False,
-            )
+            return (f"❌ <code>{phone}</code> BELUM TERDAFTAR (FRESH).\n🎁 Free trial dipakai. Sisa: {trial-1}x.", False)
         u = db.get_user(user_id)
         if (u['saldo'] if u else 0) < BIAYA_CEK_FRESH:
             return (f"❌ Balance kurang dari Rp {BIAYA_CEK_FRESH:,}.", False)
         db.deduct_saldo(user_id, BIAYA_CEK_FRESH, "Cek Nomor Kopken")
-        return (
-            f"❌ <code>{phone}</code> BELUM TERDAFTAR (FRESH).\n"
-            f"💳 Terpotong Rp {BIAYA_CEK_FRESH:,}.",
-            False,
-        )
+        return (f"❌ <code>{phone}</code> BELUM TERDAFTAR (FRESH).\n💳 Terpotong Rp {BIAYA_CEK_FRESH:,}.", False)
     if st == "registered":
-        return (
-            f"✅ <code>{phone}</code> TERDAFTAR.\nNama: {result.get('name') or '-'}\n💳 GRATIS.",
-            False,
-        )
+        return (f"✅ <code>{phone}</code> TERDAFTAR.\nNama: {result.get('name') or '-'}\n💳 GRATIS.", False)
     return (f"❓ Status tidak dikenal: {st}", False)
 
 async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -626,9 +586,7 @@ async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_T
         return
     phone = parts[1]
     reply, is_html = await _do_cek_kopken(update.effective_user.id, phone)
-    await q.edit_message_text(
-        reply, parse_mode=ParseMode.HTML if is_html else ParseMode.MARKDOWN
-    )
+    await q.edit_message_text(reply, parse_mode=ParseMode.HTML if is_html else ParseMode.MARKDOWN)
 
 async def boostly_cek_single(nomor):
     phone = nomor
@@ -637,11 +595,7 @@ async def boostly_cek_single(nomor):
     for attempt in range(2):
         async with httpx.AsyncClient(timeout=15) as client:
             try:
-                r = await client.post(
-                    f"{BOOSTLY_BASE}/api/v1/check",
-                    headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"},
-                    json={"phone": phone},
-                )
+                r = await client.post(f"{BOOSTLY_BASE}/api/v1/check", headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"}, json={"phone": phone})
                 data = r.json()
                 if data.get("success"):
                     d = data.get("data", {})
@@ -656,56 +610,3 @@ async def boostly_cek_single(nomor):
                     return {"success": False, "detail": f"Network: {e}", "raw": None}
                 await asyncio.sleep(1)
     return {"success": False, "detail": "unknown", "raw": None}
-
-
-async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    
-    trxs = db.get_user_transactions(user.id, limit=10)
-    
-    text = "📋 <b>10 Riwayat Transaksi Terakhir</b>\n\n"
-    if not trxs:
-        text += "<i>Belum ada transaksi.</i>"
-    else:
-        import datetime as dtmod
-        for t in trxs:
-            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-            sign = "+" if t['type'] == "IN" else "-"
-            icon = "🟢" if t['type'] == "IN" else "🔴"
-            text += f"{icon} {sign}Rp {t['amount']:,} | {t['description']} ({jam})\n"
-            
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Kembali ke Menu OTP", callback_data="otp_menu_back")]
-    ])
-    
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    except Exception:
-        pass
-
-async def handle_menu_back_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    # Hapus pesan lama dan panggil cmd_otp_menu
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    
-    # Bikin fake update biar bisa reuse cmd_otp_menu
-    class FakeMessage:
-        def __init__(self, original_message):
-            self._msg = original_message
-        async def reply_text(self, *args, **kwargs):
-            return await self._msg.reply_text(*args, **kwargs)
-            
-    class FakeUpdate:
-        def __init__(self, original_update):
-            self.effective_user = original_update.effective_user
-            self.effective_chat = original_update.effective_chat
-            self.message = FakeMessage(original_update.callback_query.message)
-            
-    fake_update = FakeUpdate(update)
-    await cmd_otp_menu(fake_update, ctx)

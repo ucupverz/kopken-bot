@@ -287,6 +287,48 @@ async def handle_message(update, ctx):
         )
         return
 
+    if text == "🔙 Balik ke Menu Utama" or text == "🏠 Menu Utama":
+        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+        await update.message.reply_text(
+            "🏠 <b>Menu Utama</b>", 
+            parse_mode=ParseMode.HTML, 
+            reply_markup=kb
+        )
+        return
+
+    if text == "📋 Riwayat Pesanan":
+        # Panggil fungsi riwayat
+        from otp_handlers import handle_history_callback
+        
+        # Bikin fake callback query biar bisa reuse fungsi history
+        class FakeQuery:
+            def __init__(self, msg):
+                self.message = msg
+            async def answer(self, *args, **kwargs): pass
+            async def edit_message_text(self, *args, **kwargs): pass # Biar ga error, kirim baru aja
+                
+        class FakeUpdate:
+            def __init__(self, user, msg):
+                self.effective_user = user
+                self.callback_query = FakeQuery(msg)
+                
+        # Kirim pesan history baru (karena ga bisa edit pesan yang ga ada inline button)
+        trxs = db.get_user_transactions(user.id, limit=10)
+        import datetime as dtmod
+        
+        res_text = "📋 <b>10 Riwayat Transaksi Terakhir</b>\n\n"
+        if not trxs:
+            res_text += "<i>Belum ada transaksi.</i>"
+        else:
+            for t in trxs:
+                jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+                sign = "+" if t['type'] == "IN" else "-"
+                icon = "🟢" if t['type'] == "IN" else "🔴"
+                res_text += f"{icon} {sign}Rp {t['amount']:,} | {t['description']} ({jam})\n"
+                
+        await update.message.reply_text(res_text, parse_mode=ParseMode.HTML)
+        return
+
     tu = text.upper()
     if len(tu) >= 3 and re.match(r"^[A-Z0-9_-]+$", tu) and db.get_voc(tu):
         ok, msg, quota = db.use_voc(tu, user.id)
