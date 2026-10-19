@@ -104,6 +104,7 @@ async def boostly_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
+# === UI TIMER (BISA NAMPILIN OTP 1 DAN OTP 2) ===
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-", otp2=None):
     menit = time_left // 60
     detik = time_left % 60
@@ -275,6 +276,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
+# === TIMER 5 DETIK (HAPUS & KIRIM ULANG) ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     current_msg_id = msg_id
@@ -307,6 +309,7 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         except Exception:
             pass
 
+# === POLLING OTP 2 ===
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
     if not db_order or db_order['status'] != 'waiting':
@@ -362,6 +365,7 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             except Exception:
                 pass
 
+# === FITUR CEK RIWAYAT ===
 async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
@@ -389,6 +393,7 @@ async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     await query.answer()
     await query.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+# === INI FIX BENGONG PAS BATAL & GANTI ===
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -409,11 +414,13 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
         
     if action == "batal":
+        # 1. Hapus Pesan UI lama biar bersih
         try:
-            await query.edit_message_text("⏳ Membatalkan pesanan...", reply_markup=None)
+            await query.message.delete()
         except Exception:
             pass
             
+        # 2. Potong ke API
         res, code = await wahub_client.cancel_order(last_order['order_id'])
         
         if code == 200:
@@ -422,11 +429,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             db.update_otp_order_status(last_order['order_id'], 'cancelled')
             ctx.user_data['last_order'] = None
             
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-                
+            # 3. Kirim notif sukses
             await query.message.reply_text(f"✅ Pesanan dibatalkan. Balance Rp {refund:,} dikembalikan.")
             kb = await get_otp_keyboard()
             await query.message.reply_text("Menu OTP:", reply_markup=kb)
@@ -599,7 +602,6 @@ async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
 
-# === INI YANG TADI KEHAPUS (HANDLE BUY CALLBACK) ===
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
