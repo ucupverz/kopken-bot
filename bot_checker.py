@@ -18,11 +18,11 @@ import database as db
 import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, cmd_deposit,
-    get_otp_keyboard, handle_cekstatus_callback, handle_cek_kopken_callback,
+    get_otp_menu_keyboard, handle_cekstatus_callback, handle_cek_kopken_callback,
     handle_order_action_callback, handle_buy_callback,
     boostly_cek_single, BIAYA_CEK_FRESH, CALLBACK_SEP, _do_cek_kopken,
     build_order_ui, get_order_inline_keyboard,
-    handle_history_callback, handle_menu_back_callback,  # <-- TAMBAHIN INI
+    handle_history_callback, handle_menu_back_callback
 )
 
 from sfood_handlers import (
@@ -283,7 +283,7 @@ async def handle_message(update, ctx):
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         await update.message.reply_text(
             f"Berapa nomor <b>{name}</b>?\n\nKetik angka (contoh: 1)",
-            parse_mode=ParseMode.HTML, reply_markup=await get_otp_keyboard(),
+            parse_mode=ParseMode.HTML, reply_markup=await get_otp_menu_keyboard(),
         )
         return
 
