@@ -2,29 +2,23 @@ import asyncio
 import httpx
 import os
 import time
-import datetime
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter, BadRequest
 
 import database as db
 import wahub_client
 import dehuyz_automation
 
-QUICK_SERVICES = ["Kopken Gacha", "Kopken Asoy", "Shope Gacha", "Shope Asoy"] 
 MARGIN = 700
 BIAYA_CEK_FRESH = 200
-BIAYA_API_BOOSTLY = 100
-
 BOOSTLY_BASE = "https://api.boostly.id"
 BOOSTLY_API_KEY = os.getenv("BOOSTLY_API_KEY", "kpk_live_b3fa7a15fd240b44cb12938be0c7774f")
 
 def get_menu_keyboard():
-    return ReplyKeyboardMarkup([
-        ["📱 WhatsApp OTP", "💰 Cek Balance"],
-        ["🔙 Kembali ke Menu"]
-    ], resize_keyboard=True)
+    return ReplyKeyboardMarkup([["📱 WhatsApp OTP", "💰 Cek Balance"], ["🔙 Kembali ke Menu"]], resize_keyboard=True)
 
 async def get_otp_keyboard():
     services = await wahub_client.get_services()
@@ -34,7 +28,6 @@ async def get_otp_keyboard():
         "shopee": "Shope Gacha",
         "shopee filter": "Shope Asoy"
     }
-    
     stock_map = {}
     for s in services:
         clean_name = s['name'].strip().lower()
@@ -50,8 +43,7 @@ async def get_otp_keyboard():
     return ReplyKeyboardMarkup([
         [format_btn("Kopken Gacha"), format_btn("Kopken Asoy")],
         [format_btn("Shope Gacha"), format_btn("Shope Asoy")],
-        ["📋 Cek Pesanan", "💰 Cek Balance"],
-        ["🔙 Kembali ke Menu"]
+        ["📋 Cek Pesanan", "💰 Cek Balance"], ["🔙 Kembali ke Menu"]
     ], resize_keyboard=True)
 
 def build_all_services_inline(services):
@@ -70,28 +62,21 @@ def build_all_services_inline(services):
             if s['stock'] > 0:
                 harga_jual = s['price'] + MARGIN
                 btn_text = f"{display_name} | {harga_jual:,} (Stok: {s['stock']})"
-                row.append(InlineKeyboardButton(btn_text, callback_data=f"otp_buy_{s['id']}_{harga_jual}_{display_name}"))
+                # PAKE PIPE "|" BIAR SPASI AMAN
+                row.append(InlineKeyboardButton(btn_text, callback_data=f"otp_buy|{s['id']}|{harga_jual}|{display_name}"))
             else:
                 row.append(InlineKeyboardButton(f"{display_name} (Habis)", callback_data="otp_none"))
-                
         if len(row) == 2:
             keyboard.append(row)
             row = []
-    if row:
-        keyboard.append(row)
+    if row: keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
 async def boostly_cek_single(nomor):
-    phone = nomor
-    if phone.startswith("62"):
-        phone = "0" + phone[2:]
+    phone = nomor if not nomor.startswith("62") else "0" + nomor[2:]
     async with httpx.AsyncClient(timeout=15) as client:
         try:
-            r = await client.post(
-                f"{BOOSTLY_BASE}/api/v1/check", 
-                headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"}, 
-                json={"phone": phone}
-            )
+            r = await client.post(f"{BOOSTLY_BASE}/api/v1/check", headers={"X-API-Key": BOOSTLY_API_KEY, "Content-Type": "application/json"}, json={"phone": phone})
             resp_json = r.json()
             if resp_json.get("success"):
                 data_api = resp_json.get("data", {})
@@ -104,15 +89,9 @@ async def boostly_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
-def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", expire_time=None, otp="-"):
-    if expire_time:
-        expire_str = expire_time.strftime("%H:%M")
-        expire_line = f"\n⏰ Expired: <b>{expire_str}</b>"
-    else:
-        expire_line = ""
-
+def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     if status == "Menunggu OTP":
-        status_line = f"⏳ <b>Menunggu OTP</b>{expire_line}"
+        status_line = f"⏳ <b>Menunggu OTP</b>\n<code>Exp: {int(time_left)}s</code>"
         otp_line = ""
     elif status == "Selesai":
         status_line = f"✅ <b>Pesanan Selesai</b>"
@@ -120,37 +99,25 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", expire_
     else:
         status_line = f"❌ Status: <b>{status}</b>"
         otp_line = ""
-        
     return (
         f"📦 <b>Pesanan Aktif</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 Order ID: <code>{order_id}</code>\n"
         f"📞 No. HP: <code>{phone}</code>\n"
         f"📱 Layanan: {service_name}\n"
-        f"{status_line}\n"
-        f"{otp_line}"
+        f"{status_line}\n{otp_line}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
     )
 
-def get_order_inline_keyboard(status="Menunggu OTP"):
+def get_order_inline_keyboard(status="Menunggu OTP", order_id=""):
     if status == "Menunggu OTP":
         return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔄 Ganti Nomor", callback_data="otp_act_ganti"),
-                InlineKeyboardButton("❌ Batal & Refund", callback_data="otp_act_batal")
-            ],
-            [
-                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data="otp_act_resend")
-            ]
+            [InlineKeyboardButton("🔄 Ganti Nomor", callback_data=f"otp_act_ganti|{order_id}"), InlineKeyboardButton("❌ Batal & Refund", callback_data=f"otp_act_batal|{order_id}")],
+            [InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act_resend|{order_id}")]
         ])
     else:
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data="otp_act_resend"),
-                InlineKeyboardButton("✅ Selesai", callback_data="otp_act_selesai")
-            ]
-        ])
+        return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Selesai", callback_data=f"otp_act_selesai|{order_id}")]])
 
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -161,11 +128,7 @@ async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not services:
         await update.message.reply_text("❌ Gagal mengambil daftar layanan.")
         return
-    text = (
-        f"📱 <b>Menu WhatsApp OTP</b>\n\n"
-        f"💰 Balance Anda: <b>Rp {balance:,}</b>\n\n"
-        f"Silakan pilih layanan dari list di bawah ini, atau dari keyboard bawah."
-    )
+    text = f"📱 <b>Menu WhatsApp OTP</b>\n\n💰 Balance Anda: <b>Rp {balance:,}</b>\n\nSilakan pilih layanan dari list di bawah ini."
     inline_kb = build_all_services_inline(services)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=inline_kb)
     await update.message.reply_text("⬇️ Menu cepat:", reply_markup=kb_bawah)
@@ -197,33 +160,22 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         await update.message.reply_text("❌ Layanan tidak ditemukan.")
         ctx.user_data['is_processing'] = False
         ctx.user_data.clear()
-        await update.message.reply_text("Menu OTP:", reply_markup=await get_otp_keyboard())
         return
 
     if target_service['stock'] < qty:
-        await update.message.reply_text(f"❌ Maaf, stok {display_name} sedang habis atau tidak cukup (Sisa: {target_service['stock']}).", reply_markup=await get_otp_keyboard())
+        await update.message.reply_text(f"❌ Maaf, stok {display_name} sedang habis atau tidak cukup.")
         ctx.user_data['is_processing'] = False
         ctx.user_data.clear()
         return
         
     harga_satuan = target_service['price'] + MARGIN
-    total_harga_semua = harga_satuan * qty
-    
+    total_harga = harga_satuan * qty
     u = db.get_user(user.id)
     balance = u['saldo'] if u and 'saldo' in u.keys() else 0
     kb_bawah = await get_otp_keyboard()
     
-    if balance < total_harga_semua:
-        await update.message.reply_text(
-            f"💰 Balance Anda: Rp {balance:,}\n"
-            f"💸 Total Harga untuk {qty} nomor: Rp {total_harga_semua:,}\n\n"
-            f"❌ Balance tidak cukup. Silakan deposit via QRIS di bawah ini.", 
-            parse_mode=ParseMode.HTML, reply_markup=kb_bawah
-        )
-        ctx.user_data['buy_qty'] = qty
-        ctx.user_data['buy_total'] = total_harga_semua
-        ctx.user_data['buy_id'] = target_service['id']
-        asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, total_harga_semua, ctx, is_direct_buy=True))
+    if balance < total_harga:
+        await update.message.reply_text(f"💰 Saldo Anda: Rp {balance:,}\n💸 Total: Rp {total_harga:,}\n\n❌ Saldo tidak cukup.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
         ctx.user_data['is_processing'] = False
         return
 
@@ -231,245 +183,172 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     numbers_bought = []
     for i in range(qty):
-        # 1. TEMBAK API DULU
-        try:
-            res, code = await wahub_client.rent_number(target_service['id'])
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error Provider: {e}")
-            break
+        if not db.deduct_saldo(user.id, harga_satuan):
+            break 
+        res, code = await wahub_client.rent_number(target_service['id'])
         
         if code == 200 and res.get('order_id'):
             order_id = res['order_id']
             token = res.get('token')
             phone = res.get('phone')
             
-            # 2. BARU POTONG SALDO SETELAH DAPET NOMOR
-            if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
-                await wahub_client.cancel_order(order_id)
-                await update.message.reply_text("❌ Gagal memotong saldo. Saldo tidak cukup atau sistem sibuk. Pesanan dibatalkan.", reply_markup=kb_bawah)
-                break 
-                
-            db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan)
+            waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
+            waktu_expired = waktu_sekarang_wib + timedelta(minutes=20)
+            fmt_expired = waktu_expired.strftime("%H:%M")
+            
+            ui_text = build_order_ui(order_id, display_name, phone, "Menunggu OTP", 1200)
+            ui_text = ui_text.replace("Exp: 1200s", f"Expired: {fmt_expired} WIB")
+            
+            msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP", order_id))
+            
+            db.create_otp_order(user.id, order_id, token, phone, display_name, harga_satuan, msg_ui.message_id)
             numbers_bought.append((order_id, token, phone))
+            
+            asyncio.create_task(poll_otp_bg(ctx.bot, user.id, order_id, token, display_name, msg_ui.message_id, phone))
+            if ctx.job_queue:
+                ctx.job_queue.run_once(task_timeout_job, when=1200, data={"user_id": user.id, "order_id": order_id, "msg_id": msg_ui.message_id, "service_name": display_name, "price": harga_satuan})
         else:
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
-            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+            db.add_saldo(user.id, harga_satuan)
+            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\nAlasan: <code>{err_msg}</code>\n\nSaldo dikembalikan.", parse_mode=ParseMode.HTML)
             break
             
-    if not numbers_bought:
-        ctx.user_data['is_processing'] = False
-        return
-
-    oid, tkn, ph = numbers_bought[0]
-    expire_time = datetime.now() + timedelta(minutes=20)
-    
-    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "expire_time": expire_time}
-    
-    ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", expire_time)
-    msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
-    
-    ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
-    ctx.user_data['ui_msg_id'] = msg_ui.message_id
-    
-    asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph, expire_time))
-    
-    if len(numbers_bought) > 1:
-        info_txt = f"✅ Berhasil membeli {len(numbers_bought)} nomor.\n\n"
-        for idx, (o, t, p) in enumerate(numbers_bought, 1):
-            info_txt += f"{idx}. <code>{p}</code>\n"
-            if idx > 1:
-                await asyncio.sleep(3)
-                expire_time_sub = datetime.now() + timedelta(minutes=20)
-                sub_msg = await ctx.bot.send_message(
-                    chat_id=user.id, 
-                    text=build_order_ui(o, display_name, p, "Menunggu OTP", expire_time_sub), 
-                    parse_mode=ParseMode.HTML, 
-                    reply_markup=get_order_inline_keyboard("Menunggu OTP")
-                )
-                asyncio.create_task(poll_otp_bg(ctx.bot, user.id, o, t, display_name, sub_msg.message_id, p, expire_time_sub))
-        await ctx.bot.send_message(chat_id=user.id, text=info_txt, parse_mode=ParseMode.HTML)
-
-    if "kopken" in api_name.lower() and "filter" not in api_name.lower():
-        promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
-        promo_txt += f"*(Kamu punya 2x Free Trial cek gratis!)*"
-        cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{ph}")]])
-        await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
-
-    ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
+    ctx.user_data['buy_state'] = None
 
-async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone, expire_time):
-    db_order = db.get_otp_order(order_id)
-    if not db_order or db_order['status'] != 'waiting':
-        return 
+async def task_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    oid, msg_id, price = data["order_id"], data["msg_id"], data["price"]
+    
+    if db.mark_expired_if_waiting(oid): # ATOMIC GUARD
+        cxl_res, cxl_status = await wahub_client.cancel_order(oid)
+        if cxl_status == 200:
+            db.add_saldo(data["user_id"], price)
+            try:
+                await context.bot.edit_message_text(chat_id=data["user_id"], message_id=msg_id, text=f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Saldo Rp {price:,} dikembalikan.", parse_mode=ParseMode.HTML)
+            except Exception: pass
 
+async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     start_time = time.time()
     while time.time() - start_time < 1200: 
-        db_order = db.get_otp_order(order_id)
-        if not db_order or db_order['status'] != 'waiting':
-            return 
-
         res, status = await wahub_client.check_otp(token, timeout=15)
         if status == 200 and res.get('state') == 'success':
             otp = res.get('otp')
-            db.update_otp_order_status(order_id, 'success', otp)
-            await wahub_client.mark_done(order_id)
-            
-            ui_text = build_order_ui(order_id, service_name, phone, "Selesai", expire_time, otp)
-            try:
-                await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
-            except Exception:
-                pass
-            return
-            
+            if db.mark_success_if_waiting(order_id, otp): # ATOMIC GUARD
+                await wahub_client.mark_done(order_id)
+                ui_text = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
+                try:
+                    await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai", order_id))
+                except Exception: pass
+                return
         await asyncio.sleep(15)
-        
-    # Timeout
-    db_order = db.get_otp_order(order_id)
-    if db_order and db_order['status'] == 'waiting':
-        cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
-        if cxl_status == 200:
-            db.update_otp_order_status(order_id, 'expired')
-            db.add_saldo(user_id, db_order['price'], "Refund OTP Timeout")
-            
-            ui_text = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {db_order['price']:,} dikembalikan."
-            try:
-                await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
-            except Exception:
-                pass
 
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    action = query.data.replace("otp_act_", "")
+    parts = query.data.split("|")
+    action = parts[0].replace("otp_act_", "")
+    order_id = parts[1] if len(parts) > 1 else None
     user = update.effective_user
-    last_order = ctx.user_data.get('last_order')
     
     if action == "selesai":
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
+        try: await query.delete_message()
+        except: pass
         return
         
-    if not last_order:
-        await query.message.reply_text("❌ Tidak ada pesanan aktif.")
+    if not order_id:
+        await query.message.reply_text("❌ ID Pesanan tidak valid.")
+        return
+        
+    db_order = db.get_otp_order(order_id)
+    if not db_order:
+        await query.message.reply_text("❌ Pesanan tidak ditemukan.")
         return
         
     if action == "batal":
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
+        try: await query.delete_message()
+        except: pass
             
-        res, code = await wahub_client.cancel_order(last_order['order_id'])
-        
-        if code == 200:
-            refund = last_order.get('price', 0)
-            db.add_saldo(user.id, refund, "Refund Batal Pesanan")
-            db.update_otp_order_status(last_order['order_id'], 'cancelled')
-            ctx.user_data['last_order'] = None
-            
-            await query.message.reply_text(f"✅ Pesanan dibatalkan. Balance Rp {refund:,} dikembalikan.")
-            kb = await get_otp_keyboard()
-            await query.message.reply_text("Menu OTP:", reply_markup=kb)
+        if db.mark_expired_if_waiting(order_id): # ATOMIC GUARD
+            res, code = await wahub_client.cancel_order(order_id)
+            if code == 200:
+                db.add_saldo(user.id, db_order['price'])
+                await query.message.reply_text(f"✅ Pesanan dibatalkan. Saldo Rp {db_order['price']:,} dikembalikan.")
+            else:
+                await query.message.reply_text("❌ Gagal membatalkan di provider, tapi saldo Anda tidak dipotong ulang.")
         else:
-            await query.message.reply_text("❌ Gagal membatalkan pesanan.")
-            
+            await query.message.reply_text("❌ Pesanan sudah selesai atau dibatalkan.")
+
     elif action == "ganti":
-        await handle_ganti_nomor_inline(update, ctx)
+        await handle_ganti_nomor_inline(update, ctx, order_id)
         
     elif action == "resend":
-        res, code = await wahub_client.retry_otp(last_order['token'])
+        res, code = await wahub_client.retry_otp(db_order['token'])
         if code == 200:
-            await query.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
+            await query.message.reply_text("✅ Permintaan OTP ulang dikirim.")
         else:
-            await query.message.reply_text("❌ Gagal minta ulang OTP. Mungkin batas retry habis atau waktu sewa habis.")
+            await query.message.reply_text("❌ Gagal minta ulang OTP.")
 
-async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE, order_id_lama):
     query = update.callback_query
     user = update.effective_user
-    last_order = ctx.user_data.get('last_order')
-    
-    if not last_order:
-        await query.message.reply_text("❌ Tidak ada pesanan aktif untuk diganti.")
-        return
+    db_order = db.get_otp_order(order_id_lama)
+    if not db_order: return
         
-    order_id_lama = last_order['order_id']
-    display_name = last_order['service']
-    harga = last_order['price']
-    
-    map_back = {
-        "kopken gacha": "kopken",
-        "kopken asoy": "kopken filter",
-        "shope gacha": "shopee",
-        "shope asoy": "shopee filter"
-    }
+    display_name = db_order['service_name']
+    harga = db_order['price']
+    map_back = {"kopken gacha": "kopken", "kopken asoy": "kopken filter", "shope gacha": "shopee", "shope asoy": "shopee filter"}
     api_name = map_back.get(display_name.lower(), display_name.lower())
     
     services = await wahub_client.get_services()
     target_service = next((s for s in services if s['name'].strip().lower() == api_name), None)
     
     if not target_service or target_service['stock'] < 1:
-        await query.message.reply_text(f"❌ Maaf, stok {display_name} lagi kosong. Coba lagi nanti.")
+        await query.message.reply_text(f"❌ Maaf, stok {display_name} kosong.")
         return
 
-    try:
-        await query.delete_message()
-    except Exception:
-        pass
+    try: await query.delete_message()
+    except: pass
         
     await query.message.reply_text("⏳ Membatalkan nomor lama & memproses nomor baru...")
     
-    cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
+    if not db.mark_expired_if_waiting(order_id_lama):
+        await query.message.reply_text("❌ Pesanan lama sudah selesai.")
+        return
+
+    await wahub_client.cancel_order(order_id_lama)
     
-    db.add_saldo(user.id, harga, "Refund Ganti Nomor")
-    if not db.deduct_saldo(user.id, harga, f"Ganti Nomor {display_name}"):
-        await query.message.reply_text("❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk.")
+    if not db.deduct_saldo(user.id, harga):
+        await query.message.reply_text("❌ Gagal memotong saldo.")
         return
 
     res, code = await wahub_client.rent_number(target_service['id'])
-    
     if code == 200 and res.get('order_id'):
-        new_oid = res['order_id']
-        new_tkn = res.get('token')
-        new_ph = res.get('phone')
-        expire_time = datetime.now() + timedelta(minutes=20)
+        new_oid, new_tkn, new_ph = res['order_id'], res.get('token'), res.get('phone')
         
-        db.create_otp_order(user.id, new_oid, new_tkn, new_ph, display_name, harga)
-        ctx.user_data['last_order'] = {"order_id": new_oid, "token": new_tkn, "phone": new_ph, "service": display_name, "price": harga, "expire_time": expire_time}
+        waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
+        fmt_expired = (waktu_sekarang_wib + timedelta(minutes=20)).strftime("%H:%M")
         
-        ui_text = build_order_ui(new_oid, display_name, new_ph, "Menunggu OTP", expire_time)
+        ui_text = build_order_ui(new_oid, display_name, new_ph, "Menunggu OTP", 1200).replace("Exp: 1200s", f"Expired: {fmt_expired} WIB")
+        msg_ui = await query.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP", new_oid))
         
-        msg_ui = await query.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
-        ctx.user_data['ui_msg_id'] = msg_ui.message_id
-        ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
-        
-        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph, expire_time))
-        
-        if "kopken" in api_name.lower() and "filter" not in api_name.lower():
-            promo_txt = f"💡 Nomor <code>{new_ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
-            promo_txt += f"*(Kamu punya 2x Free Trial cek gratis!)*"
-            cek_kb = InlineKeyboardMarkup([[InlineKeyboardButton("☕ Cek Kopken Sekarang", callback_data=f"otp_cekkopken_{new_ph}")]])
-            await ctx.bot.send_message(chat_id=user.id, text=promo_txt, parse_mode=ParseMode.HTML, reply_markup=cek_kb)
-        
+        db.create_otp_order(user.id, new_oid, new_tkn, new_ph, display_name, harga, msg_ui.message_id)
+        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph))
     else:
-        db.add_saldo(user.id, harga, "Refund Gagal Ganti Nomor")
-        err_msg = res.get('message') or res.get('error') or "Unknown error"
-        await query.message.reply_text(f"❌ Gagal mendapatkan nomor baru.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nSaldo dikembalikan.", parse_mode=ParseMode.HTML)
+        db.add_saldo(user.id, harga)
+        await query.message.reply_text("❌ Gagal mendapatkan nomor baru. Saldo dikembalikan.")
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = "💰 <b>Deposit Balance</b>\n\nMinimal deposit Rp 5.000.\nKetik jumlah deposit yang diinginkan (contoh: 10000):"
     ctx.user_data['deposit_state'] = 'WAITING_AMOUNT'
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=None)
+    await update.message.reply_text("💰 <b>Deposit Balance</b>\n\nMinimal Rp 5.000.\nKetik jumlah deposit (contoh: 10000):", parse_mode=ParseMode.HTML)
 
 async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount: int):
     if amount < 5000:
         await update.message.reply_text("❌ Minimal deposit Rp 5.000.")
         return
     ctx.user_data['deposit_state'] = None 
-    msg = await update.message.reply_text(f"⏳ Memproses QRIS untuk Rp {amount:,}...", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"⏳ Memproses QRIS untuk Rp {amount:,}...", parse_mode=ParseMode.HTML)
     asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, amount, ctx, is_direct_buy=False))
 
 async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
@@ -478,165 +357,61 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
         await bot.send_message(chat_id, f"❌ Gagal membuat QRIS: {result}")
         return
         
-    qris_bytes = result["image"]
-    caption_dehuy = result["caption"]
-    qris_msg_id = result["msg_id"] 
+    qris_msg = await bot.send_photo(chat_id=chat_id, photo=InputFile(result["image"], filename="qris.jpg"), caption=result["caption"], parse_mode=ParseMode.HTML)
     
-    keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
-    qris_msg = await bot.send_photo(
-        chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"), 
-        caption=caption_dehuy, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    
-    async def bg_wait_and_process():
-        is_paid_status = await dehuyz_automation.wait_for_payment(amount, qris_msg_id)
-        if is_paid_status == "success":
-            try:
-                await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"✅ <b>Topup Rp{amount:,} berhasil, balance sudah masuk.</b>", parse_mode=ParseMode.HTML, reply_markup=None)
-            except Exception: pass
+    async def bg_wait():
+        is_paid = await dehuyz_automation.wait_for_payment(amount, result["msg_id"])
+        if is_paid == "success":
+            try: await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"✅ <b>Topup Rp{amount:,} berhasil.</b>", parse_mode=ParseMode.HTML)
+            except: pass
                 
             if is_direct_buy:
                 display_name = ctx.user_data.get('buy_service')
                 service_id = ctx.user_data.get('buy_id')
                 qty = ctx.user_data.get('buy_qty', 1)
-                harga_satuan = amount // qty
                 
+                if not db.deduct_saldo(chat_id, amount, f"Beli {display_name}"):
+                    await bot.send_message(chat_id, "❌ Gagal memotong saldo setelah bayar.")
+                    return
+
                 res, code = await wahub_client.rent_number(service_id)
-                
                 if code == 200 and res.get('order_id'):
-                    oid = res['order_id']
-                    tkn = res['token']
-                    ph = res['phone']
+                    oid, tkn, ph = res['order_id'], res['token'], res['phone']
+                    harga_satuan = amount // qty
                     
-                    if not db.deduct_saldo(chat_id, amount, f"Beli {display_name}"):
-                        await wahub_client.cancel_order(oid)
-                        await bot.send_message(chat_id, "❌ Gagal memotong saldo setelah QRIS. Sistem sibuk.")
-                        return
-                        
-                    db.create_otp_order(chat_id, oid, tkn, ph, display_name, harga_satuan)
-                    expire_time = datetime.now() + timedelta(minutes=20)
+                    waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
+                    fmt_expired = (waktu_sekarang_wib + timedelta(minutes=20)).strftime("%H:%M")
                     
-                    ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", expire_time)
+                    ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200).replace("Exp: 1200s", f"Expired: {fmt_expired} WIB")
+                    msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP", oid))
                     
-                    msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
-                    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "msg_id": msg_ui.message_id, "expire_time": expire_time}
-                    
-                    asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph, expire_time))
+                    db.create_otp_order(chat_id, oid, tkn, ph, display_name, harga_satuan, msg_ui.message_id)
+                    asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph))
                 else:
-                    err_msg = res.get('message') or res.get('error') or "Unknown error"
-                    db.add_saldo(chat_id, amount, "Refund Gagal Order")
-                    await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance Rp {amount:,} dikembalikan.", parse_mode=ParseMode.HTML)
-                
+                    db.add_saldo(chat_id, amount)
+                    await bot.send_message(chat_id, "❌ Gagal menyewa nomor setelah bayar. Saldo dikembalikan.")
             else:
-                db.add_saldo(chat_id, amount, f"Topup QRIS Rp {amount:,}")
-                u = db.get_user(chat_id)
-                kb = await get_otp_keyboard()
-                await bot.send_message(chat_id, f"✅ Deposit Berhasil! Balance masuk Rp {amount:,}.\nTotal Balance: Rp {u['saldo']:,}", reply_markup=kb)
+                db.add_saldo(chat_id, amount)
+                await bot.send_message(chat_id, f"✅ Deposit Rp {amount:,} Berhasil!", reply_markup=await get_otp_keyboard())
                 
-        elif is_paid_status == "timeout":
-            try:
-                await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"❌ <b>QRIS Kadaluarsa</b>", parse_mode=ParseMode.HTML, reply_markup=None)
-            except Exception: pass
+        elif is_paid == "timeout":
+            try: await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption="❌ <b>QRIS Kadaluarsa</b>", parse_mode=ParseMode.HTML)
+            except: pass
 
-    asyncio.create_task(bg_wait_and_process())
-
-async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
+    asyncio.create_task(bg_wait())
 
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user = update.effective_user
-    data_parts = query.data.split("_")
-    if len(data_parts) < 4 or data_parts[1] == "none": return
-    service_id = int(data_parts[2])
-    harga_jual = int(data_parts[3])
-    service_name = data_parts[4]
+    
+    # SPLIT PAKE PIPE "|"
+    parts = query.data.split("|")
+    if len(parts) != 4: return
+    
+    _, service_id, harga_jual, service_name = parts
     ctx.user_data['buy_service'] = service_name
     ctx.user_data['buy_qty'] = 1
-    ctx.user_data['buy_total'] = harga_jual
-    ctx.user_data['buy_id'] = service_id
-    await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML)
-    ctx.user_data['buy_state'] = 'WAITING_QTY'
-
-async def handle_cek_kopken_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    phone = query.data.split("_")[2]
-    user = update.effective_user
-    
-    trial_tersisa = db.get_trial_kopken(user.id)
-    
-    await query.edit_message_text(f"🔍 Mengecek nomor `{phone}` ke Kopi Kenangan...", parse_mode=ParseMode.MARKDOWN)
-    
-    result = await boostly_cek_single(phone)
-    
-    if not result.get("success"):
-        raw_data = result.get("raw", "Ga ada data")
-        detail_error = result.get("detail", "Ga ada detail")
-        
-        promo_txt = (
-            f"⚠️ <b>Debugging API Boostly</b>\n\n"
-            f"<b>Detail:</b> {detail_error}\n"
-            f"<b>Raw Response:</b>\n<code>{raw_data}</code>\n\n"
-            f"Tolong kirim screenshot ini ke developer."
-        )
-        await query.edit_message_text(promo_txt, parse_mode=ParseMode.HTML)
-        return
-        
-    status = result.get("status")
-    
-    if status == "fresh":
-        if trial_tersisa > 0:
-            db.set_trial_kopken(user.id, trial_tersisa - 1)
-            reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n🎁 Kamu menggunakan 1x Free Trial cek. Sisa trial: {trial_tersisa-1}x."
-        else:
-            u = db.get_user(user.id)
-            balance = u['saldo'] if u and 'saldo' in u.keys() else 0
-            if balance < BIAYA_CEK_FRESH:
-                await query.edit_message_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
-                return
-            db.deduct_saldo(user.id, BIAYA_CEK_FRESH, "Cek Nomor Kopken")
-            reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
-            
-    elif status == "registered":
-        reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {result.get('name') or '-'}\n\n💳 Cek GRATIS."
-    else:
-        reply = f"❓ Status tidak dikenal: `{status}`"
-        
-    await query.edit_message_text(reply, parse_mode=ParseMode.MARKDOWN)
-
-async def handle_buy_filter_auto_cancel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    last_order = ctx.user_data.get('last_order')
-    
-    if last_order:
-        await query.edit_message_text("⏳ Membatalkan pesanan sebelumnya...")
-        res, code = await wahub_client.cancel_order(last_order['order_id'])
-        if code == 200:
-            refund = last_order.get('price', 0)
-            db.add_saldo(user.id, refund, "Refund Batal (Beli Filter)")
-            db.update_otp_order_status(last_order['order_id'], 'cancelled')
-            ctx.user_data['last_order'] = None
-            await query.message.reply_text(f"✅ Pesanan lama dibatalkan. Balance Rp {refund:,} dikembalikan.")
-        else:
-            await query.message.reply_text("⚠️ Gagal membatalkan pesanan lama, tapi lanjut proses beli Kopken Asoy.")
-
-    data_parts = query.data.split("_")
-    service_id = int(data_parts[2])
-    harga_jual = int(data_parts[3])
-    service_name = data_parts[4]
-    
-    ctx.user_data['buy_service'] = service_name
-    ctx.user_data['buy_qty'] = 1
-    ctx.user_data['buy_total'] = harga_jual
-    ctx.user_data['buy_id'] = service_id
-    
-    await query.message.reply_text(
-        f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
-        parse_mode=ParseMode.HTML
-    )
+    ctx.user_data['buy_total'] = int(harga_jual)
+    ctx.user_data['buy_id'] = int(service_id)
+    await query.edit_message_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka:", parse_mode=ParseMode.HTML)
     ctx.user_data['buy_state'] = 'WAITING_QTY'

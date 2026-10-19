@@ -14,119 +14,69 @@ def init_db():
     with get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                saldo INTEGER DEFAULT 0,
-                trial_kopken INTEGER DEFAULT 2,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, saldo INTEGER DEFAULT 0, trial_kopken INTEGER DEFAULT 2, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS otp_orders (
-                order_id TEXT PRIMARY KEY,
-                user_id INTEGER,
-                token TEXT,
-                phone TEXT,
-                service_name TEXT,
-                price INTEGER,
-                status TEXT DEFAULT 'waiting',
-                otp TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                order_id TEXT PRIMARY KEY, user_id INTEGER, token TEXT, phone TEXT, service_name TEXT, price INTEGER, status TEXT DEFAULT 'waiting', otp TEXT, msg_id INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS voc_codes (
-                code TEXT PRIMARY KEY,
-                quota INTEGER,
-                active INTEGER DEFAULT 1,
-                created_by INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                used_by INTEGER,
-                used_at TIMESTAMP
+                code TEXT PRIMARY KEY, quota INTEGER, active INTEGER DEFAULT 1, created_by INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, used_by INTEGER, used_at TIMESTAMP
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                amount INTEGER,
-                type TEXT,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, type TEXT, description TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sfood_orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id TEXT UNIQUE,
-                user_id INTEGER,
-                label TEXT,
-                code TEXT,
-                last_status INTEGER DEFAULT 0,
-                last_status_text TEXT,
-                last_eta TEXT,
-                last_driver_name TEXT,
-                last_driver_phone TEXT,
-                last_flag TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT UNIQUE, user_id INTEGER, label TEXT, code TEXT, last_status INTEGER DEFAULT 0, last_status_text TEXT, last_eta TEXT, last_driver_name TEXT, last_driver_phone TEXT, last_flag TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # --- PAKSA SEMUA SALDO JADI INTEGER ---
+        # MIGRASI KOLOM MSG_ID
         try:
-            conn.execute("UPDATE users SET saldo = CAST(saldo AS INTEGER)")
-            print("✅ Perbaikan tipe data saldo selesai.")
-        except Exception as e:
-            print(f"⚠️ Gagal perbaiki tipe data: {e}")
-
+            conn.execute("ALTER TABLE otp_orders ADD COLUMN msg_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
         print("✅ Database initialized.")
 
-# === PERBAIKAN MUTLAK SALDO PAKE SQL ===
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            
-            # Paksa baca saldo sebagai INTEGER
-            cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as saldo_int FROM users WHERE user_id = ?", (user_id,))
+            cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as s FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
-            
-            if not row:
-                conn.execute("ROLLBACK")
-                print(f"[DB] User {user_id} tidak ditemukan.")
+            if not row or row['s'] < amount:
                 return False
-            
-            saldo_skrg = row['saldo_int']
-            amount = int(amount)
-            
-            if saldo_skrg < amount:
-                conn.execute("ROLLBACK")
-                print(f"[DB] Saldo tidak cukup: {saldo_skrg} < {amount}")
-                return False
-            
-            # Update dengan CAST juga, biar aman
-            conn.execute("UPDATE users SET saldo = CAST(saldo AS INTEGER) - ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
-            conn.execute("COMMIT")
             return True
         except Exception as e:
-            conn.execute("ROLLBACK")
             print(f"[DB] Deduct error: {e}")
             return False
 
 def add_saldo(user_id, amount, desc="Topup / Refund"):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (int(amount), user_id))
-            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, int(amount), desc))
-            conn.execute("COMMIT")
+            conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, amount, desc))
             return True
         except Exception as e:
-            conn.execute("ROLLBACK")
             print(f"[DB] Add saldo error: {e}")
             return False
+
+def mark_success_if_waiting(order_id, otp):
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE otp_orders SET status='success', otp=? WHERE order_id=? AND status='waiting'", (otp, order_id))
+        return cur.rowcount == 1
+
+def mark_expired_if_waiting(order_id):
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE otp_orders SET status='expired' WHERE order_id=? AND status='waiting'", (order_id,))
+        return cur.rowcount == 1
 
 def get_user(user_id):
     with get_conn() as conn:
@@ -135,29 +85,21 @@ def get_user(user_id):
 
 def create_user(user_id, username, first_name):
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name",
-            (user_id, username, first_name)
-        )
+        conn.execute("INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name", (user_id, username, first_name))
 
 def get_trial_kopken(user_id):
     with get_conn() as conn:
         cursor = conn.execute("SELECT trial_kopken FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
-        if row and row['trial_kopken'] is not None:
-            return row['trial_kopken']
-        return 2
+        return row['trial_kopken'] if row and row['trial_kopken'] is not None else 2
 
 def set_trial_kopken(user_id, sisa):
     with get_conn() as conn:
         conn.execute("UPDATE users SET trial_kopken = ? WHERE user_id = ?", (sisa, user_id))
 
-def create_otp_order(user_id, order_id, token, phone, service_name, price):
+def create_otp_order(user_id, order_id, token, phone, service_name, price, msg_id=None):
     with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO otp_orders (order_id, user_id, token, phone, service_name, price) VALUES (?, ?, ?, ?, ?, ?)",
-            (order_id, user_id, token, phone, service_name, price)
-        )
+        conn.execute("INSERT INTO otp_orders (order_id, user_id, token, phone, service_name, price, msg_id) VALUES (?, ?, ?, ?, ?, ?, ?)", (order_id, user_id, token, phone, service_name, price, msg_id))
 
 def update_otp_order_status(order_id, status, otp=None):
     with get_conn() as conn:
@@ -187,20 +129,14 @@ def get_voc(code):
 def use_voc(code, user_id):
     with get_conn() as conn:
         try:
-            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("SELECT * FROM voc_codes WHERE code = ? AND active = 1", (code,))
             voc = cursor.fetchone()
-            if not voc:
-                conn.execute("ROLLBACK")
-                return False, "Kode tidak valid atau sudah terpakai.", 0
-            
+            if not voc: return False, "Kode tidak valid atau sudah terpakai.", 0
             conn.execute("UPDATE voc_codes SET active = 0, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?", (user_id, code))
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (voc['quota'], user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', 'Redeem VOC')", (user_id, voc['quota']))
-            conn.execute("COMMIT")
             return True, f"Berhasil klaim Rp {voc['quota']:,}", voc['quota']
         except Exception as e:
-            conn.execute("ROLLBACK")
             return False, f"Error: {e}", 0
 
 def get_user_transactions(user_id, limit=10):
@@ -244,16 +180,30 @@ def get_voc_detail(code):
 
 def get_recent_topups(limit=20):
     with get_conn() as conn:
-        cursor = conn.execute("""
-            SELECT t.*, u.first_name, u.username 
-            FROM transactions t 
-            JOIN users u ON t.user_id = u.user_id 
-            WHERE t.description LIKE '%Topup%' OR t.description LIKE '%QRIS%' 
-            ORDER BY t.id DESC LIMIT ?
-        """, (limit,))
+        cursor = conn.execute("SELECT t.*, u.first_name, u.username FROM transactions t JOIN users u ON t.user_id = u.user_id WHERE t.description LIKE '%Topup%' OR t.description LIKE '%QRIS%' ORDER BY t.id DESC LIMIT ?", (limit,))
         return cursor.fetchall()
 
-def get_recent_users(limit=10):
+def get_recent_users(limit=20):
     with get_conn() as conn:
         cursor = conn.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ?", (limit,))
         return cursor.fetchall()
+
+def sfood_get_active_orders():
+    with get_conn() as conn:
+        cursor = conn.execute("SELECT * FROM sfood_orders WHERE last_status != 999 AND last_status != 600")
+        return cursor.fetchall()
+
+def sfood_stop_order(order_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE sfood_orders SET last_status = 600 WHERE order_id = ?", (order_id,))
+
+def sfood_update_status(order_id, status_code, status_text, driver_name=None, driver_phone=None):
+    with get_conn() as conn:
+        conn.execute("UPDATE sfood_orders SET last_status = ?, last_status_text = ?, last_driver_name = ?, last_driver_phone = ? WHERE order_id = ?", (status_code, status_text, driver_name, driver_phone, order_id))
+
+def sfood_update_flag(order_id, flag):
+    with get_conn() as conn:
+        conn.execute("UPDATE sfood_orders SET last_flag = ? WHERE order_id = ?", (flag, order_id))
+
+def sfood_add_log(order_id, status_code, status_text):
+    pass # Skip log to prevent crash if table missing

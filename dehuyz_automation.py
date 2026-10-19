@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -10,7 +11,6 @@ TG_SESSION_STR = os.getenv("TG_SESSION_STR", "")
 DEHUYZ_BOT = "@dehuyzwaotpbot"
 
 async def request_qris(amount: int):
-    """Minta QRIS dan ambil teks caption aslinya, plus ID pesannya."""
     if not API_ID or not API_HASH:
         return "error", "TG_API_ID / TG_API_HASH belum di-set!"
 
@@ -59,7 +59,6 @@ async def request_qris(amount: int):
         qris_bytes = await client.download_media(qris_msg, bytes)
         caption_text = qris_msg.text or "" 
         
-        # KITA SIMPAN ID PESAN QRIS-NYA
         return "success", {"image": qris_bytes, "caption": caption_text, "msg_id": qris_msg.id}
         
     except Exception as e:
@@ -68,34 +67,29 @@ async def request_qris(amount: int):
         await client.disconnect()
 
 async def wait_for_payment(amount: int, qris_msg_id: int):
-    """Polling cek status pembayaran khusus untuk QRIS ini."""
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
     await client.connect()
     try:
-        max_wait = 300 
-        start_time = asyncio.get_event_loop().time()
-        
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            remaining = int(max_wait - elapsed)
-            
-            if remaining <= 0:
-                return "timeout"
-                
+        deadline = asyncio.get_event_loop().time() + 300
+        cursor = qris_msg_id
+        while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(5)
-            
-            # Cek pesan baru SETELAH pesan QRIS ini dibuat
-            new_msgs = await client.get_messages(DEHUYZ_BOT, min_id=qris_msg_id, limit=5)
-            
-            # Urutkan dari yang paling lama ke baru
-            new_msgs = sorted(new_msgs, key=lambda x: x.id)
-            
-            for msg in new_msgs:
+            # PAKE REVERSE=TRUE DAN MIN_ID AGAR TIDAK ADA PESAN YANG TERLEWAT
+            msgs = await client.get_messages(DEHUYZ_BOT, min_id=cursor, limit=10, reverse=True)
+            for msg in msgs:
+                cursor = max(cursor, msg.id)
                 text = (msg.text or "").lower()
                 if "berhasil" in text and "saldo" in text:
-                    # Cek nominalnya juga buat mastiin
-                    if str(amount) in text:
-                        return "success"
-                qris_msg_id = msg.id # Update ID biar ga ngecek pesan yang sama 2x
+                    # AMBIL ANGKA DAN BERSIHKAN TITIK/KOMA
+                    nums = re.findall(r"\d[\d.,]*", text)
+                    for n in nums:
+                        try:
+                            # HAPUS TITIK DAN KOMA, BARU BANDINGIN
+                            clean_num = int(n.replace(".", "").replace(",", ""))
+                            if clean_num == amount:
+                                return "success"
+                        except ValueError:
+                            continue
+        return "timeout"
     finally:
         await client.disconnect()
