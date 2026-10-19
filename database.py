@@ -88,23 +88,26 @@ def deduct_saldo(user_id, amount, desc="Pembelian"):
         try:
             conn.execute("BEGIN IMMEDIATE")
             
-            # Cek saldo dulu buat mastiin cukup (di SQL, bukan di Python)
-            cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
+            # Paksa baca saldo sebagai INTEGER
+            cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as saldo_int FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             
             if not row:
                 conn.execute("ROLLBACK")
+                print(f"[DB] User {user_id} tidak ditemukan.")
                 return False
-                
-            # PAKSA JADI INT
-            saldo_skrg = int(row['saldo'])
             
-            if saldo_skrg < int(amount):
+            saldo_skrg = row['saldo_int']
+            amount = int(amount)
+            
+            if saldo_skrg < amount:
                 conn.execute("ROLLBACK")
+                print(f"[DB] Saldo tidak cukup: {saldo_skrg} < {amount}")
                 return False
             
-            conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (int(amount), user_id))
-            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, int(amount), desc))
+            # Update dengan CAST juga, biar aman
+            conn.execute("UPDATE users SET saldo = CAST(saldo AS INTEGER) - ? WHERE user_id = ?", (amount, user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
             conn.execute("COMMIT")
             return True
         except Exception as e:
