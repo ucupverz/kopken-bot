@@ -73,7 +73,7 @@ def init_db():
             )
         """)
         
-        # --- INI KUNCINYA: PERBAIKI TIPE DATA SALDO YANG RUSAK ---
+        # --- PAKSA SEMUA SALDO JADI INTEGER ---
         try:
             conn.execute("UPDATE users SET saldo = CAST(saldo AS INTEGER)")
             print("✅ Perbaikan tipe data saldo selesai.")
@@ -82,23 +82,29 @@ def init_db():
 
         print("✅ Database initialized.")
 
-# === PERBAIKAN MUTLAK SALDO ===
+# === PERBAIKAN MUTLAK SALDO PAKE SQL ===
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            
+            # Cek saldo dulu buat mastiin cukup (di SQL, bukan di Python)
             cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             
-            # Paksa ambil nilai integer
-            saldo_skrg = int(row['saldo']) if row else 0
+            if not row:
+                conn.execute("ROLLBACK")
+                return False
+                
+            # PAKSA JADI INT
+            saldo_skrg = int(row['saldo'])
             
-            if not row or saldo_skrg < amount:
+            if saldo_skrg < int(amount):
                 conn.execute("ROLLBACK")
                 return False
             
-            conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
-            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
+            conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (int(amount), user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, int(amount), desc))
             conn.execute("COMMIT")
             return True
         except Exception as e:
@@ -110,8 +116,8 @@ def add_saldo(user_id, amount, desc="Topup / Refund"):
     with get_conn() as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
-            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, amount, desc))
+            conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (int(amount), user_id))
+            conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, int(amount), desc))
             conn.execute("COMMIT")
             return True
         except Exception as e:

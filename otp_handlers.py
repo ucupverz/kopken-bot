@@ -208,25 +208,8 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     harga_satuan = target_service['price'] + MARGIN
     total_harga_semua = harga_satuan * qty
     
-    u = db.get_user(user.id)
-    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
-    kb_bawah = await get_otp_keyboard()
-    
-    if balance < total_harga_semua:
-        await update.message.reply_text(
-            f"💰 Balance Anda: Rp {balance:,}\n"
-            f"💸 Total Harga untuk {qty} nomor: Rp {total_harga_semua:,}\n\n"
-            f"❌ Balance tidak cukup. Silakan deposit via QRIS di bawah ini.", 
-            parse_mode=ParseMode.HTML, reply_markup=kb_bawah
-        )
-        ctx.user_data['buy_qty'] = qty
-        ctx.user_data['buy_total'] = total_harga_semua
-        ctx.user_data['buy_id'] = target_service['id']
-        asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, total_harga_semua, ctx, is_direct_buy=True))
-        ctx.user_data['is_processing'] = False
-        return
-
-    await update.message.reply_text(f"⏳ Sedang membuat pesanan...", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+    # HAPUS PENGECEKAN BALANCE DI PYTHON, SERAHIN KE SQL
+    await update.message.reply_text(f"⏳ Sedang membuat pesanan...", parse_mode=ParseMode.HTML)
     
     numbers_bought = []
     for i in range(qty):
@@ -247,7 +230,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         else:
             err_msg = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
             db.add_saldo(user.id, harga_satuan, f"Refund gagal sewa {display_name}")
-            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML, reply_markup=kb_bawah)
+            await update.message.reply_text(f"❌ Gagal membuat pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance dikembalikan.", parse_mode=ParseMode.HTML)
             break
             
     if not numbers_bought:
