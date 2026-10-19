@@ -72,6 +72,14 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # --- INI KUNCINYA: PERBAIKI TIPE DATA SALDO YANG RUSAK ---
+        try:
+            conn.execute("UPDATE users SET saldo = CAST(saldo AS INTEGER)")
+            print("✅ Perbaikan tipe data saldo selesai.")
+        except Exception as e:
+            print(f"⚠️ Gagal perbaiki tipe data: {e}")
+
         print("✅ Database initialized.")
 
 # === PERBAIKAN MUTLAK SALDO ===
@@ -82,7 +90,10 @@ def deduct_saldo(user_id, amount, desc="Pembelian"):
             cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             
-            if not row or row['saldo'] < amount:
+            # Paksa ambil nilai integer
+            saldo_skrg = int(row['saldo']) if row else 0
+            
+            if not row or saldo_skrg < amount:
                 conn.execute("ROLLBACK")
                 return False
             

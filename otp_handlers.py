@@ -104,7 +104,6 @@ async def boostly_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
-# === TIMER 5 DETIK BALIK LAGI ===
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-"):
     menit = time_left // 60
     detik = time_left % 60
@@ -231,7 +230,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     
     numbers_bought = []
     for i in range(qty):
-        # Potong saldo di sini
         if not db.deduct_saldo(user.id, harga_satuan, f"Beli {display_name}"):
             u_skrg = db.get_user(user.id)
             saldo_skrg = u_skrg['saldo'] if u_skrg and 'saldo' in u_skrg.keys() else 0
@@ -256,9 +254,8 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         ctx.user_data['is_processing'] = False
         return
 
-    # === KIRIM UI BUAT NOMOR PERTAMA ===
     oid, tkn, ph = numbers_bought[0]
-    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan}
+    ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "time_left": 1200}
     
     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
     msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
@@ -266,15 +263,15 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
     ctx.user_data['ui_msg_id'] = msg_ui.message_id
     
-    # JALANIN TIMER (HAPUS & KIRIM ULANG)
     asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, display_name, ph, 1200))
     asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph))
     
-    # === KIRIM UI BUAT NOMOR KEDUA, KETIGA, DST (JEDA 3 DETIK) ===
     if len(numbers_bought) > 1:
+        info_txt = f"✅ Berhasil membeli {len(numbers_bought)} nomor.\n\n"
         for idx, (o, t, p) in enumerate(numbers_bought, 1):
+            info_txt += f"{idx}. <code>{p}</code>\n"
             if idx > 1:
-                await asyncio.sleep(3) # Jeda biar ga rate limit
+                await asyncio.sleep(3)
                 sub_msg = await ctx.bot.send_message(
                     chat_id=user.id, 
                     text=build_order_ui(o, display_name, p, "Menunggu OTP", 1200), 
@@ -283,6 +280,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                 )
                 asyncio.create_task(run_timer(ctx.bot, user.id, sub_msg.message_id, o, display_name, p, 1200))
                 asyncio.create_task(poll_otp_bg(ctx.bot, user.id, o, t, display_name, sub_msg.message_id, p))
+        await ctx.bot.send_message(chat_id=user.id, text=info_txt, parse_mode=ParseMode.HTML)
 
     if "kopken" in api_name.lower() and "filter" not in api_name.lower():
         promo_txt = f"💡 Nomor <code>{ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
@@ -293,13 +291,12 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['buy_state'] = None
     ctx.user_data['is_processing'] = False
 
-# === FUNGSI TIMER (HAPUS & KIRIM ULANG) ===
 async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_time):
     start_time = time.time()
     current_msg_id = msg_id
     
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(5) 
         elapsed = int(time.time() - start_time)
         time_left = total_time - elapsed
         
@@ -466,7 +463,6 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     
     cxl_res, cxl_code = await wahub_client.cancel_order(order_id_lama)
     
-    # Kembalikan saldo lama dulu, baru potong saldo baru
     db.add_saldo(user.id, harga, "Refund Ganti Nomor")
     if not db.deduct_saldo(user.id, harga, f"Ganti Nomor {display_name}"):
         await query.message.reply_text("❌ Gagal memotong saldo Anda. Saldo tidak cukup atau sistem sedang sibuk.")
