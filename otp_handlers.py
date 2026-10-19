@@ -251,9 +251,7 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
         ctx.user_data['is_processing'] = False
         return
 
-    # Looping buat nampilin pesanan di chat
     for idx, (oid, tkn, ph) in enumerate(numbers_bought):
-        # Hitung waktu expired WIB (Waktu Indonesia Barat = UTC+7)
         waktu_sekarang_wib = datetime.utcnow() + timedelta(hours=7)
         waktu_expired = waktu_sekarang_wib + timedelta(minutes=20)
         fmt_expired = waktu_expired.strftime("%H:%M")
@@ -271,7 +269,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             ctx.user_data['ui_msg_id'] = msg_ui.message_id
             ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
         
-        # JADWALKAN TIMEOUT 20 MENIT (1200 detik) VIA JOB QUEUE
         if ctx.job_queue:
             ctx.job_queue.run_once(
                 callback=task_timeout_job,
