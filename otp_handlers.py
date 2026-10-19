@@ -104,7 +104,6 @@ async def boostly_cek_single(nomor):
         except Exception as e:
             return {"success": False, "detail": f"Network error: {e}", "raw": None}
 
-# === UI DENGAN SLOT OTP KEDUA ===
 def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_left=1200, otp="-", otp2=None):
     menit = time_left // 60
     detik = time_left % 60
@@ -249,7 +248,6 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['ui_msg_id'] = msg_ui.message_id
     
     asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, display_name, ph, 1200))
-    # Panggil polling dengan param tambahan buat nangkep OTP 2
     asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph))
     
     if len(numbers_bought) > 1:
@@ -309,7 +307,6 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         except Exception:
             pass
 
-# === POLLING OTP 2 ===
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone):
     db_order = db.get_otp_order(order_id)
     if not db_order or db_order['status'] != 'waiting':
@@ -324,12 +321,10 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
         if not db_order or db_order['status'] != 'waiting':
             return 
 
-        # Panggil API buat ngecek OTP baru
         res, status = await wahub_client.check_otp(token, timeout=15)
         if status == 200 and res.get('state') == 'success':
             otp_baru = res.get('otp')
             
-            # Kalau baru dapet OTP pertama
             if otp_pertama is None:
                 otp_pertama = otp_baru
                 db.update_otp_order_status(order_id, 'success', otp_pertama)
@@ -339,10 +334,9 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                 try:
                     await bot.delete_message(chat_id=user_id, message_id=msg_id)
                     new_msg = await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
-                    msg_id = new_msg.message_id # Update msg_id
+                    msg_id = new_msg.message_id 
                 except Exception: pass
                 
-            # Kalau OTP beda dari yang pertama (OTP Kedua)
             elif otp_baru != otp_pertama and otp_kedua is None:
                 otp_kedua = otp_baru
                 
@@ -351,12 +345,9 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                     await bot.delete_message(chat_id=user_id, message_id=msg_id)
                     await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
                 except Exception: pass
-                # Lo bisa stop di sini kalau cuma mau 2 OTP maksimal, 
-                # atau lanjut looping kalau ada OTP 3, dst.
                 
         await asyncio.sleep(15)
         
-    # Kalau 20 menit abis dan belum dapet OTP pertama, baru cancel
     db_order = db.get_otp_order(order_id)
     if db_order and db_order['status'] == 'waiting':
         cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
@@ -370,6 +361,10 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                 await bot.send_message(chat_id=user_id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Selesai"))
             except Exception:
                 pass
+
+async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Fitur history sedang dikembangkan.", show_alert=True)
 
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -414,7 +409,6 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         await handle_ganti_nomor_inline(update, ctx)
         
     elif action == "resend":
-        # === HANDLE TOMBOL REOTP ===
         res, code = await wahub_client.retry_otp(last_order['token'])
         if code == 200:
             await query.message.reply_text("✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk.")
