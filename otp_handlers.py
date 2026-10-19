@@ -362,10 +362,35 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
             except Exception:
                 pass
 
+# === FITUR CEK RIWAYAT / HISTORY ===
 async def handle_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("Fitur history sedang dikembangkan.", show_alert=True)
+    user = update.effective_user
+    
+    trxs = db.get_user_transactions(user.id, limit=15)
+    
+    text = "📜 <b>Riwayat Transaksi Kamu</b>\n\n"
+    
+    if not trxs:
+        text += "<i>Belum ada transaksi.</i>"
+    else:
+        import datetime as dtmod
+        for t in trxs:
+            try:
+                dt = dtmod.datetime.strptime(t['created_at'], "%Y-%m-%d %H:%M:%S")
+                jam = dt.strftime("%d/%m %H:%M")
+            except:
+                jam = "-"
+                
+            if t['amount'] > 0:
+                text += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            else:
+                text += f"🔴 -Rp {abs(t['amount']):,} | {t['description']} ({jam})\n"
+                
+    await query.answer()
+    await query.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+# === FITUR BATAL & REFUND ===
 async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -387,7 +412,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         
     if action == "batal":
         try:
-            await query.delete_message()
+            await query.edit_message_text("⏳ Membatalkan pesanan...", reply_markup=None)
         except Exception:
             pass
             
@@ -399,6 +424,11 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
             db.update_otp_order_status(last_order['order_id'], 'cancelled')
             ctx.user_data['last_order'] = None
             
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+                
             await query.message.reply_text(f"✅ Pesanan dibatalkan. Balance Rp {refund:,} dikembalikan.")
             kb = await get_otp_keyboard()
             await query.message.reply_text("Menu OTP:", reply_markup=kb)
@@ -571,7 +601,6 @@ async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer("Sistem sedang mengecek pembayaran Anda secara otomatis di background. Mohon tunggu.", show_alert=True)
 
-# === INI FIX BENGONGNYA ===
 async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -586,7 +615,6 @@ async def handle_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['buy_total'] = harga_jual
     ctx.user_data['buy_id'] = service_id
     
-    # Kirim pesan baru, jangan edit (karena edit ke ReplyKeyboard sering diblock Telegram)
     await query.message.reply_text(
         f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", 
         parse_mode=ParseMode.HTML

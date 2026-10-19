@@ -327,24 +327,26 @@ async def handle_message(update, ctx):
         return
 
     if text == "📋 Cek Pesanan":
-        last_order = ctx.user_data.get('last_order')
-        if not last_order:
-            await update.message.reply_text("❌ Tidak ada pesanan aktif.")
-            return
-            
-        order_db = db.get_otp_order(last_order['order_id'])
-        if order_db:
-            if order_db['status'] == 'success':
-                status_msg = "Selesai (OTP Diterima)"
-            elif order_db['status'] == 'waiting':
-                status_msg = "Menunggu OTP"
-            else:
-                status_msg = order_db['status']
+        trxs = db.get_user_transactions(user.id, limit=15)
+        txt = "📜 <b>Riwayat Transaksi Kamu</b>\n\n"
+        
+        if not trxs:
+            txt += "<i>Belum ada transaksi.</i>"
         else:
-            status_msg = "Tidak diketahui"
-            
-        msg = f"📋 <b>Detail Pesanan Aktif</b>\n\nLayanan: {last_order['service']}\nNomor: <code>{last_order['phone']}</code>\nStatus: {status_msg}"
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            import datetime as dtmod
+            for t in trxs:
+                try:
+                    dt = dtmod.datetime.strptime(t['created_at'], "%Y-%m-%d %H:%M:%S")
+                    jam = dt.strftime("%d/%m %H:%M")
+                except:
+                    jam = "-"
+                    
+                if t['amount'] > 0:
+                    txt += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+                else:
+                    txt += f"🔴 -Rp {abs(t['amount']):,} | {t['description']} ({jam})\n"
+                    
+        await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
         return
 
     if text.startswith("🛒 "):
