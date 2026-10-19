@@ -100,7 +100,6 @@ def admin_keyboard():
         ["❓ Bantuan"]
     ], resize_keyboard=True)
 
-# === BACKGROUND REFUNDER (ANTI NYANGKUT) ===
 async def bg_check_stuck_orders(app):
     while True:
         await asyncio.sleep(60)
@@ -497,10 +496,10 @@ async def lifespan(app: FastAPI):
     await bot_app.start()
     await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram-webhook", drop_pending_updates=True)
     print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
-    # asyncio.create_task(tracker_worker(bot_app.bot))
-    # print("[SFOOD] Tracker worker started")
     
-    # JALANIN BACKGROUND REFUNDER
+    asyncio.create_task(tracker_worker(bot_app.bot))
+    print("[SFOOD] Tracker worker started")
+    
     asyncio.create_task(bg_check_stuck_orders(bot_app))
     print("[CRON] Background refunder started")
     yield
