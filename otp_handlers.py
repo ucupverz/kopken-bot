@@ -28,8 +28,6 @@ MAP_DISPLAY = {
 MAP_BACK = {v.lower(): k for k, v in MAP_DISPLAY.items()}
 CALLBACK_SEP = "|"
 
-# ---------------- keyboards ----------------
-
 def get_menu_keyboard():
     return ReplyKeyboardMarkup([
         ["📱 WhatsApp OTP", "💰 Cek Balance"],
@@ -91,7 +89,8 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_le
         status_line = f"⏳ <b>Menunggu OTP</b>\n<code>[{bar}] {menit:02d}:{detik:02d}</code>"
         otp_line = ""
     elif status == "Selesai":
-        status_line = "✅ <b>Pesanan Selesai</b>"
+        # Timer tetap terlihat di bawah OTP
+        status_line = f"✅ <b>Pesanan Selesai</b>\n<code>[Sisa Waktu: {menit:02d}:{detik:02d}]</code>"
         otp_line = f"🔑 Kode OTP: <code>{otp}</code>\n"
     else:
         status_line = f"❌ Status: <b>{status}</b>"
@@ -126,8 +125,6 @@ def get_order_inline_keyboard(order_id, status="Menunggu OTP"):
         ],
     ])
 
-# ---------------- boostly ----------------
-
 async def boostly_cek_single(nomor):
     phone = nomor
     if phone.startswith("62"):
@@ -155,8 +152,6 @@ async def boostly_cek_single(nomor):
                 await asyncio.sleep(1)
     return {"success": False, "detail": "unknown", "raw": None}
 
-# ---------------- order UI helpers ----------------
-
 async def send_order_ui(bot, chat_id, order_id, service_name, phone, user_id, total_time=1200):
     text = build_order_ui(order_id, service_name, phone, "Menunggu OTP", total_time)
     msg = await bot.send_message(
@@ -176,60 +171,70 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         if left <= 0:
             return
         order = db.get_otp_order(order_id)
-        if not order or order['status'] != 'waiting':
+        if not order:
             return
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=msg_id,
-                text=build_order_ui(order_id, service_name, phone, "Menunggu OTP", left),
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP"),
-            )
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-        except BadRequest:
-            return
-        except Exception:
+            
+        # Kalau OTP sudah masuk (status success), timer lanjut update UI mode "Selesai"
+        if order['status'] == 'success':
+            try:
+                ui = build_order_ui(order_id, service_name, phone, "Selesai", left, order['otp'])
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id, text=ui,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
+                )
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception:
+                pass
+        elif order['status'] == 'waiting':
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg_id,
+                    text=build_order_ui(order_id, service_name, phone, "Menunggu OTP", left),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard(order_id, "Menunggu OTP"),
+                )
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception:
+                pass
+        else:
+            # expired / cancelled, stop timer
             return
 
 async def poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg_id, total_time):
     start = time.time()
     while time.time() - start < total_time:
         order = db.get_otp_order(order_id)
-        if not order or order['status'] != 'waiting':
+        if not order:
             return
+        if order['status'] != 'waiting':
+            return # Timer udah handle UI, hentikan polling
+            
         res, status = await wahub_client.check_otp(order['token'], timeout=15)
         if status == 200 and res.get('state') == 'success':
             otp = res.get('otp')
             if db.mark_success_if_waiting(order_id, otp):
                 await wahub_client.mark_done(order_id)
-                ui = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=msg_id, text=ui,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-                    )
-                except Exception:
-                    try:
-                        await bot.send_message(
-                            chat_id=chat_id, text=ui, parse_mode=ParseMode.HTML,
-                            reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-                        )
-                    except Exception:
-                        pass
+                # UI akan di-update sama run_timer jadi "Selesai", poll berenti
             return
         await asyncio.sleep(15)
 
+    # Kalau waktu abis dan belum dapet OTP, baru refund
     order = db.get_otp_order(order_id)
-    if not order or order['status'] != 'waiting':
-        return
-    res, status = await wahub_client.check_otp(order['token'], timeout=15)
-    if status == 200 and res.get('state') == 'success':
-        otp = res.get('otp')
-        if db.mark_success_if_waiting(order_id, otp):
-            await wahub_client.mark_done(order_id)
-            ui = build_order_ui(order_id, service_name, phone, "Selesai", 0, otp)
+    if order and order['status'] == 'waiting':
+        res, status = await wahub_client.check_otp(order['token'], timeout=15)
+        if status == 200 and res.get('state') == 'success':
+            otp = res.get('otp')
+            if db.mark_success_if_waiting(order_id, otp):
+                await wahub_client.mark_done(order_id)
+            return
+            
+        cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
+        if cxl_status == 200 and db.mark_status_if_waiting(order_id, 'expired'):
+            db.add_saldo(user_id, order['price'], "Refund OTP Timeout")
+            ui = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {order['price']:,} dikembalikan."
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id, message_id=msg_id, text=ui,
@@ -238,22 +243,6 @@ async def poll_otp_bg(bot, user_id, chat_id, order_id, service_name, phone, msg_
                 )
             except Exception:
                 pass
-        return
-
-    cxl_res, cxl_status = await wahub_client.cancel_order(order_id)
-    if cxl_status == 200 and db.mark_status_if_waiting(order_id, 'expired'):
-        db.add_saldo(user_id, order['price'], "Refund OTP Timeout")
-        ui = f"⏰ <b>Waktu Habis</b>\n\nOTP tidak masuk. Balance Rp {order['price']:,} dikembalikan."
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=msg_id, text=ui,
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_order_inline_keyboard(order_id, "Selesai"),
-            )
-        except Exception:
-            pass
-
-# ---------------- handlers ----------------
 
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -334,7 +323,8 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
             else:
                 err = res.get('message') or res.get('error') or res.get('msg') or f"HTTP {code}"
                 await update.message.reply_text(
-                    f"❌ Gagal pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err}</code>",
+                    f"❌ Gagal pesanan ke-{i+1}.\n<b>Alasan:</b> <code>{err}</code>\n\n"
+                    "Silakan coba beberapa saat lagi.",
                     parse_mode=ParseMode.HTML,
                 )
                 break
@@ -437,8 +427,8 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
 
     if action == "resend":
-        if order['status'] != 'waiting':
-            await query.message.reply_text("❌ Pesanan tidak aktif.")
+        if order['status'] != 'waiting' and order['status'] != 'success':
+            await query.message.reply_text("❌ Pesanan tidak aktif / sudah selesai.")
             return
         res, code = await wahub_client.retry_otp(order['token'])
         if code == 200:
@@ -509,8 +499,6 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         await ctx.bot.send_message(
             chat_id=user.id, text=promo, parse_mode=ParseMode.HTML, reply_markup=kb
         )
-
-# ---------------- deposit / QRIS ----------------
 
 async def cmd_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['deposit_state'] = 'WAITING_AMOUNT'
@@ -624,8 +612,6 @@ async def process_qris_payment(bot, chat_id, user_id, amount, ctx, is_direct_buy
 async def handle_cekstatus_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer("Pembayaran dicek otomatis. Mohon tunggu.", show_alert=True)
-
-# ---------------- kopken ----------------
 
 async def _do_cek_kopken(user_id, phone):
     trial = db.get_trial_kopken(user_id)

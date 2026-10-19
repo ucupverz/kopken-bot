@@ -167,9 +167,11 @@ async def handle_message(update, ctx):
     if not db.get_user(user.id):
         db.create_user(user.id, user.username or "", user.first_name or "")
 
-    if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
-        await process_direct_buy(update, ctx, int(text))
-        return
+    if ctx.user_data.get('buy_state') == 'WAITING_QTY':
+        clean = re.sub(r'\D', '', text)
+        if clean:
+            await process_direct_buy(update, ctx, int(clean))
+            return
 
     if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
         await process_deposit(update, ctx, int(text))
@@ -518,7 +520,7 @@ async def process_webhook_otp(order_id, otp):
         return
     chat_id = order['user_id']
     text = build_order_ui(
-        order_id, order['service_name'], order['phone'], "Selesai", 0, otp
+        order_id, order['service_name'], order['phone'], "Selesai", 1200, otp
     )
     msg_id = order['msg_id']
     if msg_id:
