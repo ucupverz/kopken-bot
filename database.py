@@ -72,39 +72,39 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        try:
-            conn.execute("ALTER TABLE sfood_orders ADD COLUMN last_flag TEXT")
-        except sqlite3.OperationalError:
-            pass
-        print("✅ Database initialized & migrated.")
+        print("✅ Database initialized.")
 
+# === PERBAIKAN MUTLAK SALDO ===
 def deduct_saldo(user_id, amount, desc="Pembelian"):
     with get_conn() as conn:
         try:
-            # PAKSA CAST KE INTEGER (biar kalau format string ga nge-bug)
-            cursor = conn.execute("SELECT CAST(saldo AS INTEGER) as s FROM users WHERE user_id = ?", (user_id,))
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute("SELECT saldo FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             
-            # Ini bakal nge-print di log Railway lu, biar lu tau saldo asli yang dibaca bot
-            print(f"[DB] Deduct user {user_id}, saldo saat ini: {row['s'] if row else 'NOT FOUND'}, butuh: {amount}")
-            
-            if not row or row['s'] < amount:
+            if not row or row['saldo'] < amount:
+                conn.execute("ROLLBACK")
                 return False
             
             conn.execute("UPDATE users SET saldo = saldo - ? WHERE user_id = ?", (amount, user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'OUT', ?)", (user_id, amount, desc))
+            conn.execute("COMMIT")
             return True
         except Exception as e:
+            conn.execute("ROLLBACK")
             print(f"[DB] Deduct error: {e}")
             return False
 
 def add_saldo(user_id, amount, desc="Topup / Refund"):
     with get_conn() as conn:
         try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (amount, user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', ?)", (user_id, amount, desc))
+            conn.execute("COMMIT")
             return True
         except Exception as e:
+            conn.execute("ROLLBACK")
             print(f"[DB] Add saldo error: {e}")
             return False
 
@@ -167,15 +167,20 @@ def get_voc(code):
 def use_voc(code, user_id):
     with get_conn() as conn:
         try:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("SELECT * FROM voc_codes WHERE code = ? AND active = 1", (code,))
             voc = cursor.fetchone()
             if not voc:
+                conn.execute("ROLLBACK")
                 return False, "Kode tidak valid atau sudah terpakai.", 0
+            
             conn.execute("UPDATE voc_codes SET active = 0, used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ?", (user_id, code))
             conn.execute("UPDATE users SET saldo = saldo + ? WHERE user_id = ?", (voc['quota'], user_id))
             conn.execute("INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, 'IN', 'Redeem VOC')", (user_id, voc['quota']))
+            conn.execute("COMMIT")
             return True, f"Berhasil klaim Rp {voc['quota']:,}", voc['quota']
         except Exception as e:
+            conn.execute("ROLLBACK")
             return False, f"Error: {e}", 0
 
 def get_user_transactions(user_id, limit=10):
@@ -226,39 +231,6 @@ def get_recent_topups(limit=20):
             WHERE t.description LIKE '%Topup%' OR t.description LIKE '%QRIS%' 
             ORDER BY t.id DESC LIMIT ?
         """, (limit,))
-        return cursor.fetchall()
-
-# === FUNGSI SFOOD (DARI FILE LU) ===
-def sfood_get_active_orders():
-    with get_conn() as conn:
-        cursor = conn.execute("SELECT * FROM sfood_orders WHERE last_status != 999 AND last_status != 600") # 600=selesai, 999=batal
-        return cursor.fetchall()
-
-def sfood_stop_order(order_id):
-    with get_conn() as conn:
-        conn.execute("UPDATE sfood_orders SET last_status = 600 WHERE order_id = ?", (order_id,))
-
-def sfood_update_status(order_id, status_code, status_text, driver_name=None, driver_phone=None):
-    with get_conn() as conn:
-        conn.execute("""
-            UPDATE sfood_orders SET last_status = ?, last_status_text = ?, 
-            last_driver_name = ?, last_driver_phone = ? WHERE order_id = ?
-        """, (status_code, status_text, driver_name, driver_phone, order_id))
-
-def sfood_update_flag(order_id, flag):
-    with get_conn() as conn:
-        conn.execute("UPDATE sfood_orders SET last_flag = ? WHERE order_id = ?", (flag, order_id))
-
-def sfood_add_log(order_id, status_code, status_text):
-    with get_conn() as conn:
-        conn.execute("""
-            INSERT INTO sfood_logs (order_id, status_code, status_text) 
-            VALUES (?, ?, ?)
-        """, (order_id, status_code, status_text))
-
-def get_recent_topups(limit=10):
-    with get_conn() as conn:
-        cursor = conn.execute("SELECT * FROM transactions WHERE type = 'IN' AND description LIKE 'Topup%' ORDER BY id DESC LIMIT ?", (limit,))
         return cursor.fetchall()
 
 def get_recent_users(limit=10):
