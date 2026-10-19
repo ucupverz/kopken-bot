@@ -21,7 +21,7 @@ import database as db
 import wahub_client
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
-    cmd_deposit, get_menu_keyboard, handle_cekstatus_callback,
+    cmd_deposit, get_menu_keyboard, get_otp_keyboard, handle_cekstatus_callback,
     handle_cek_kopken_callback, handle_order_action_callback, 
     handle_buy_filter_auto_cancel_callback, handle_buy_callback,
     boostly_cek_single, BIAYA_CEK_FRESH, handle_history_callback
@@ -361,7 +361,6 @@ async def handle_message(update, ctx):
         if not service_name:
             await update.message.reply_text("❌ Format tombol tidak dikenali.")
             return
-        kb_otp = await get_otp_keyboard()
         await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardMarkup([["📋 Cek Pesanan"], ["🔙 Kembali ke Menu"]], resize_keyboard=True))
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
@@ -496,6 +495,11 @@ async def cmd_vocdetail(update, ctx):
 
 async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
+    try:
+        if update is not None and getattr(update, "effective_chat", None):
+            await ctx.bot.send_message(update.effective_chat.id, "⚠️ Terjadi error di bot. Coba lagi, atau tekan /start.")
+    except Exception:
+        pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -601,6 +605,7 @@ def main():
     
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    bot_app.add_error_handler(error_handler)
     
     print("🌐 Web Server (FastAPI) jalan di port 8080")
     uvicorn.run(api_app, host="0.0.0.0", port=8080, log_level="info")
