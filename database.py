@@ -1,6 +1,8 @@
 import os
 import time
 import datetime
+import hashlib
+import secrets
 from contextlib import contextmanager
 import psycopg2
 import psycopg2.extras
@@ -12,7 +14,7 @@ def get_conn():
     # Fallback ke SQLite lokal kalau dites di PC
     if not DATABASE_URL:
         import sqlite3
-        conn = sqlite3.connect("bot.db", timeout=30, isolation_level=None)
+        conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH", "bot.db"), timeout=30, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         try:
@@ -86,6 +88,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS otp_orders (order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, token TEXT, phone TEXT, service_name TEXT, price INTEGER, status TEXT DEFAULT 'waiting', otp TEXT, msg_id INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')));
             CREATE TABLE IF NOT EXISTS voc_codes (code TEXT PRIMARY KEY, quota INTEGER NOT NULL, active INTEGER DEFAULT 1, created_by INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')), used_by INTEGER, used_at INTEGER);
             """)
+    init_whatsapp_invites()
 
 def create_user(user_id, username, first_name):
     with get_conn() as ctx:
@@ -343,6 +346,7 @@ def use_voc(code, user_id):
             ctx.execute("UPDATE voc_codes SET active=0, used_by=?, used_at=strftime('%s','now') WHERE code=?", (user_id, code))
             ctx.execute("UPDATE users SET saldo = saldo + ? WHERE user_id=?", (row['quota'], user_id))
             ctx.execute("INSERT INTO transactions(user_id,type,amount,description) VALUES(?,?,?,?)", (user_id, 'IN', row['quota'], f"Redeem {code}"))
+            ctx.commit()
             return True, f"Berhasil", row['quota']
 
 def list_voc_codes(limit=20):
@@ -437,3 +441,93 @@ def get_recent_users(limit=10):
             return cur.fetchall()
         else:
             return ctx.execute("SELECT * FROM users ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+
+# WhatsApp access codes are separate from balance vouchers. Only SHA-256 hashes
+# of high-entropy, single-use codes are persisted; plaintext is returned once.
+def init_whatsapp_invites():
+    with get_conn() as ctx:
+        cur = ctx[1] if DATABASE_URL else ctx.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS whatsapp_invites (
+            code_hash TEXT PRIMARY KEY,
+            created_by BIGINT NOT NULL,
+            created_at BIGINT NOT NULL,
+            used_by BIGINT,
+            used_at BIGINT
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS whatsapp_access (
+            user_id BIGINT PRIMARY KEY,
+            granted_at BIGINT NOT NULL,
+            invite_hash TEXT NOT NULL UNIQUE
+        )""")
+
+
+def _invite_hash(code):
+    return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+
+
+def has_whatsapp_access(user_id):
+    with get_conn() as ctx:
+        cur = ctx[1] if DATABASE_URL else ctx.cursor()
+        marker = "%s" if DATABASE_URL else "?"
+        result = cur.execute(f"SELECT user_id FROM whatsapp_access WHERE user_id={marker}", (user_id,))
+        return (cur.fetchone() if DATABASE_URL else result.fetchone()) is not None
+
+
+def create_whatsapp_invites(created_by, count=1):
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 20:
+        raise ValueError("Jumlah kode harus 1 sampai 20.")
+    codes = ["WA-" + secrets.token_hex(16).upper() for _ in range(count)]
+    with get_conn() as ctx:
+        cur = ctx[1] if DATABASE_URL else ctx.cursor()
+        markers = "%s,%s,%s" if DATABASE_URL else "?,?,?"
+        if not DATABASE_URL:
+            cur.execute("BEGIN IMMEDIATE")
+        try:
+            for code in codes:
+                cur.execute(f"INSERT INTO whatsapp_invites(code_hash, created_by, created_at) VALUES({markers})",
+                            (_invite_hash(code), created_by, int(time.time())))
+            if not DATABASE_URL:
+                ctx.commit()
+        except Exception:
+            if not DATABASE_URL:
+                ctx.rollback()
+            raise
+    return codes
+
+
+def redeem_whatsapp_invite(code, user_id):
+    """Return granted/already_allowed/invalid/used. Claim and grant are atomic.
+
+    SQLite serializes writers; PostgreSQL locks per user then conditionally claims
+    the code row. This also prevents one user burning two codes concurrently.
+    """
+    digest = _invite_hash(code)
+    with get_conn() as ctx:
+        cur = ctx[1] if DATABASE_URL else ctx.cursor()
+        marker = "%s" if DATABASE_URL else "?"
+        if DATABASE_URL:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (int(user_id),))
+        else:
+            cur.execute("BEGIN IMMEDIATE")
+        try:
+            cur.execute(f"SELECT user_id FROM whatsapp_access WHERE user_id={marker}", (user_id,))
+            if cur.fetchone() is not None:
+                result = "already_allowed"
+            else:
+                now = int(time.time())
+                cur.execute(f"UPDATE whatsapp_invites SET used_by={marker}, used_at={marker} "
+                            f"WHERE code_hash={marker} AND used_by IS NULL", (user_id, now, digest))
+                if cur.rowcount == 1:
+                    cur.execute(f"INSERT INTO whatsapp_access(user_id, granted_at, invite_hash) "
+                                f"VALUES({marker},{marker},{marker})", (user_id, now, digest))
+                    result = "granted"
+                else:
+                    cur.execute(f"SELECT used_by FROM whatsapp_invites WHERE code_hash={marker}", (digest,))
+                    result = "used" if cur.fetchone() is not None else "invalid"
+            if not DATABASE_URL:
+                ctx.commit()
+            return result
+        except Exception:
+            if not DATABASE_URL:
+                ctx.rollback()
+            raise

@@ -19,6 +19,8 @@ from telegram.constants import ParseMode
 
 import database as db
 import wahub_client
+from invite_access import (cmd_generate_invite, cmd_cancel_invite,
+    handle_invite_message, require_whatsapp_access, clear_invite_flow)
 from otp_handlers import (
     cmd_otp_menu, process_direct_buy, process_deposit, 
     cmd_deposit, get_menu_keyboard, get_otp_keyboard, handle_cekstatus_callback,
@@ -143,6 +145,7 @@ async def bg_check_stuck_orders(app):
             logger.exception("[CRON] Gagal memeriksa order OTP: %s", exc)
 
 async def cmd_start(update, ctx):
+    clear_invite_flow(ctx)
     user = update.effective_user
     db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
@@ -206,6 +209,16 @@ async def handle_message(update, ctx):
     if not db.get_user(user.id):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
+
+    # Navigation must win over pending input (including stale purchase states).
+    if text in ("🔙 Kembali ke Menu", "🔙 Menu Utama", "Batal", "batal", "cancel"):
+        clear_invite_flow(ctx)
+        ctx.user_data.pop('deposit_state', None)
+        ctx.user_data.pop('cek_kopken_state', None)
+        await cmd_start(update, ctx)
+        return
+    if await handle_invite_message(update, ctx):
+        return
 
     if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
         qty = int(text)
@@ -333,6 +346,8 @@ async def handle_message(update, ctx):
         return
 
     if text == "📋 Cek Pesanan":
+        if not await require_whatsapp_access(update, ctx):
+            return
         trxs = db.get_user_transactions(user.id, limit=15)
         txt = "📜 <b>Riwayat Transaksi Kamu</b>\n\n"
         
@@ -356,12 +371,15 @@ async def handle_message(update, ctx):
         return
 
     if text.startswith("🛒 "):
+        if not await require_whatsapp_access(update, ctx):
+            return
         match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
         service_name = match.group(1).strip() if match else None
         if not service_name:
             await update.message.reply_text("❌ Format tombol tidak dikenali.")
             return
-        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardMarkup([["📋 Cek Pesanan"], ["🔙 Kembali ke Menu"]], resize_keyboard=True))
+        kb_otp = await get_otp_keyboard()
+        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
         ctx.user_data['buy_service'] = service_name
         ctx.user_data['buy_state'] = 'WAITING_QTY'
         return
@@ -381,6 +399,7 @@ async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id): return
     s = db.get_stats()
     text = f"🔧 *Admin Panel*\n\n👥 Users: {s['total_users']}\n☕ Total cek: {s['total_cek']}\n\n*Generate VOC:* `/genvoc` `[saldo]` `[kode]`\n\n*ShopeeFood Admin:*\n`/sfood_users` — List user\n`/sfood_leaderboard` — Leaderboard\n`/sfood_userinfo <id>` — Detail user\n\n*Kelola:* `/revoke <kode>` `/addsaldo <id> <n>`"
+    text += "\n\n*Undangan WhatsApp OTP:* `/generate_invite [1-20]` (chat pribadi, sekali pakai)."
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_genvoc(update, ctx):
@@ -495,11 +514,6 @@ async def cmd_vocdetail(update, ctx):
 
 async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
-    try:
-        if update is not None and getattr(update, "effective_chat", None):
-            await ctx.bot.send_message(update.effective_chat.id, "⚠️ Terjadi error di bot. Coba lagi, atau tekan /start.")
-    except Exception:
-        pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -583,6 +597,8 @@ def main():
     bot_app.add_handler(CommandHandler("tarif", cmd_tarif))
     bot_app.add_handler(CommandHandler("tarif_cek", cmd_tarif_cek))
     bot_app.add_handler(CommandHandler("tarif_stats", cmd_tarif_stats))
+    bot_app.add_handler(CommandHandler("generate_invite", cmd_generate_invite))
+    bot_app.add_handler(CommandHandler("cancel", cmd_cancel_invite))
     bot_app.add_handler(CommandHandler("admin", cmd_admin))
     bot_app.add_handler(CommandHandler("genvoc", cmd_genvoc))
     bot_app.add_handler(CommandHandler("listvoc", cmd_listvoc))
@@ -605,7 +621,6 @@ def main():
     
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    bot_app.add_error_handler(error_handler)
     
     print("🌐 Web Server (FastAPI) jalan di port 8080")
     uvicorn.run(api_app, host="0.0.0.0", port=8080, log_level="info")
