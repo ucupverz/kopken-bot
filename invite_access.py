@@ -132,5 +132,5 @@ async def cmd_generate_invite(update, ctx):
         "Kode undangan WhatsApp OTP (sekali pakai, satu pengguna per kode):\n\n"
         + "\n".join(codes)
         + "\n\nAkses tersimpan setelah redeem. Kode ini bukan VOC saldo. Simpan sebelum menutup chat.",
-        protect_content=True,
+        protect_content=False,
     )
