@@ -199,216 +199,220 @@ async def cmd_balance(update, ctx):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_message(update, ctx):
-    text = (update.message.text or "").strip()
-    user = update.effective_user
+    try:
+        text = (update.message.text or "").strip()
+        user = update.effective_user
 
-    if not db.get_user(user.id):
-        db.create_user(user.id, user.username or "", user.first_name or "")
-    u = db.get_user(user.id)
+        if not db.get_user(user.id):
+            db.create_user(user.id, user.username or "", user.first_name or "")
+        u = db.get_user(user.id)
 
-    if text in ("🔙 Kembali ke Menu", "🔙 Menu Utama", "Batal", "batal", "cancel"):
-        clear_invite_flow(ctx)
-        ctx.user_data.pop('deposit_state', None)
-        ctx.user_data.pop('cek_kopken_state', None)
-        ctx.user_data.pop('sfood_stop_state', None)
-        await cmd_start(update, ctx)
-        return
-    if await handle_invite_message(update, ctx):
-        return
-
-    if text == "🍔 Tambah Order":
-        await cmd_sfood(update, ctx)
-        return
-
-    if text == "📋 List Order":
-        await cmd_sfood_list(update, ctx)
-        return
-
-    if text == "❌ Stop Order":
-        await cmd_sfood_stop_prompt(update, ctx)
-        return
-
-    if await handle_sfood_stop_message(update, ctx):
-        return
-
-    if text == "🛒 Beli Lagi":
-        await cmd_otp_menu(update, ctx)
-        return
-
-    if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
-        qty = int(text)
-        await process_direct_buy(update, ctx, qty)
-        return
-        
-    if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
-        amount = int(text)
-        await process_deposit(update, ctx, amount)
-        return
-
-    if ctx.user_data.get('cek_kopken_state') == 'WAITING_PHONE':
-        ctx.user_data['cek_kopken_state'] = None
-        if not is_valid_phone(text):
-            await update.message.reply_text("❌ Format nomor tidak valid. Silakan coba lagi.")
+        if text in ("🔙 Kembali ke Menu", "🔙 Menu Utama", "Batal", "batal", "cancel"):
+            clear_invite_flow(ctx)
+            ctx.user_data.pop('deposit_state', None)
+            ctx.user_data.pop('cek_kopken_state', None)
+            ctx.user_data.pop('sfood_stop_state', None)
+            await cmd_start(update, ctx)
             return
-        
-        phone = normalize_phone(text)
-        msg = await update.message.reply_text("🔍 Mengecek nomor Kopken...")
-        
-        trial_tersisa = db.get_trial_kopken(user.id)
-        result = await boostly_cek_single(phone)
-        
-        if not result.get("success"):
-            raw_data = result.get("raw", "Ga ada data")
-            detail_error = result.get("detail", "Ga ada detail")
-            
-            promo_txt = (
-                f"⚠️ <b>Debugging API Boostly</b>\n\n"
-                f"<b>Detail:</b> {detail_error}\n"
-                f"<b>Raw Response:</b>\n<code>{raw_data}</code>\n\n"
-                f"Tolong kirim screenshot ini ke developer."
-            )
-            await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML)
+        if await handle_invite_message(update, ctx):
+            return
+
+        if text == "🍔 Tambah Order":
+            await cmd_sfood(update, ctx)
+            return
+
+        if text == "📋 List Order":
+            await cmd_sfood_list(update, ctx)
+            return
+
+        if text == "❌ Stop Order":
+            await cmd_sfood_stop_prompt(update, ctx)
+            return
+
+        if await handle_sfood_stop_message(update, ctx):
+            return
+
+        if text == "🛒 Beli Lagi":
+            await cmd_otp_menu(update, ctx)
+            return
+
+        if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
+            qty = int(text)
+            await process_direct_buy(update, ctx, qty)
             return
             
-        status = result.get("status")
-        
-        if status == "fresh":
-            if trial_tersisa > 0:
-                db.set_trial_kopken(user.id, trial_tersisa - 1)
-                reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n🎁 Kamu menggunakan 1x Free Trial cek. Sisa trial: {trial_tersisa-1}x."
-            else:
-                u = db.get_user(user.id)
-                balance = u['saldo'] if u and 'saldo' in u.keys() else 0
-                if balance < BIAYA_CEK_FRESH:
-                    await msg.edit_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
-                    return
-                db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
-                reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
+        if ctx.user_data.get('deposit_state') == 'WAITING_AMOUNT' and text.isdigit():
+            amount = int(text)
+            await process_deposit(update, ctx, amount)
+            return
+
+        if ctx.user_data.get('cek_kopken_state') == 'WAITING_PHONE':
+            ctx.user_data['cek_kopken_state'] = None
+            if not is_valid_phone(text):
+                await update.message.reply_text("❌ Format nomor tidak valid. Silakan coba lagi.")
+                return
+            
+            phone = normalize_phone(text)
+            msg = await update.message.reply_text("🔍 Mengecek nomor Kopken...")
+            
+            trial_tersisa = db.get_trial_kopken(user.id)
+            result = await boostly_cek_single(phone)
+            
+            if not result.get("success"):
+                raw_data = result.get("raw", "Ga ada data")
+                detail_error = result.get("detail", "Ga ada detail")
                 
-        elif status == "registered":
-            reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {result.get('name') or '-'}\n\n💳 Cek GRATIS."
-        else:
-            reply = f"❓ Status tidak dikenal: `{status}`"
+                promo_txt = (
+                    f"⚠️ <b>Debugging API Boostly</b>\n\n"
+                    f"<b>Detail:</b> {detail_error}\n"
+                    f"<b>Raw Response:</b>\n<code>{raw_data}</code>\n\n"
+                    f"Tolong kirim screenshot ini ke developer."
+                )
+                await msg.edit_text(promo_txt, parse_mode=ParseMode.HTML)
+                return
+                
+            status = result.get("status")
             
-        await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
-        await handle_sfood_message(update, ctx)
-        return
-
-    if text == "☕ Cek Nomor Kopken":
-        await update.message.reply_text("Silakan kirim nomor HP yang mau dicek.\n\nContoh: `081234567890`", parse_mode=ParseMode.MARKDOWN)
-        ctx.user_data['cek_kopken_state'] = 'WAITING_PHONE'
-        return
-
-    if text == "💰 Cek Balance":
-        await cmd_balance(update, ctx)
-        return
-
-    if text == "💳 Topup Balance":
-        await cmd_deposit(update, ctx)
-        return
-
-    if text == "📱 WhatsApp OTP":
-        await cmd_otp_menu(update, ctx)
-        return
-        
-    if text == "🔑 Redeem Invitation Code":
-        await update.message.reply_text("Silakan kirim kode Invitation / VOC kamu.\n\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "🍔 ShopeeFood":
-        await cmd_sfood(update, ctx)
-        return
-
-    if text == "❓ Bantuan":
-        await cmd_help(update, ctx)
-        return
-
-    if text == "🔧 Admin Panel" and is_admin(user.id):
-        await cmd_admin(update, ctx)
-        return
-        
-    if text == "📥 Topup Log" and is_admin(user.id):
-        topups = db.get_recent_topups(10)
-        if not topups:
-            await update.message.reply_text("Belum ada topup.")
-            return
-        txt = "📥 *10 Topup Terakhir*\n\n"
-        import datetime as dtmod
-        for t in topups:
-            jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
-            txt += f"🟢 Rp {t['amount']:,} | User: `{t['user_id']}` | {jam}\n"
-        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "🆕 User Baru" and is_admin(user.id):
-        users = db.get_recent_users(10)
-        txt = "🆕 *10 User Terbaru*\n\n"
-        import datetime as dtmod
-        for u in users:
-            jam = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
-            uname = f"@{u['username']}" if u['username'] else "(no uname)"
-            txt += f"👤 `{u['user_id']}` | {u['first_name']} {uname} | {jam}\n"
-        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
-        kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
-        balance = u['saldo'] if u and 'saldo' in u.keys() else 0
-        await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
-        return
-
-    if text == "📋 Cek Pesanan":
-        if not await require_whatsapp_access(update, ctx):
-            return
-        trxs = db.get_user_transactions(user.id, limit=15)
-        txt = "📜 <b>Riwayat Transaksi Kamu</b>\n\n"
-        
-        if not trxs:
-            txt += "<i>Belum ada transaksi.</i>"
-        else:
-            import datetime as dtmod
-            for t in trxs:
-                try:
-                    dt = dtmod.datetime.strptime(t['created_at'], "%Y-%m-%d %H:%M:%S")
-                    jam = dt.strftime("%d/%m %H:%M")
-                except:
-                    jam = "-"
-                    
-                if t['amount'] > 0:
-                    txt += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+            if status == "fresh":
+                if trial_tersisa > 0:
+                    db.set_trial_kopken(user.id, trial_tersisa - 1)
+                    reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n🎁 Kamu menggunakan 1x Free Trial cek. Sisa trial: {trial_tersisa-1}x."
                 else:
-                    txt += f"🔴 -Rp {abs(t['amount']):,} | {t['description']} ({jam})\n"
+                    u = db.get_user(user.id)
+                    balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+                    if balance < BIAYA_CEK_FRESH:
+                        await msg.edit_text(f"❌ Balance tidak cukup buat bayar biaya cek (Rp {BIAYA_CEK_FRESH:,}).")
+                        return
+                    db.deduct_saldo(user.id, BIAYA_CEK_FRESH)
+                    reply = f"❌ Nomor `{phone}` BELUM TERDAFTAR (FRESH).\n\n💳 Balance terpotong: Rp {BIAYA_CEK_FRESH:,}."
                     
-        await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
-        return
-
-    if text.startswith("🛒 "):
-        if not await require_whatsapp_access(update, ctx):
+            elif status == "registered":
+                reply = f"✅ Nomor `{phone}` TERDAFTAR di Kopken.\nNama: {result.get('name') or '-'}\n\n💳 Cek GRATIS."
+            else:
+                reply = f"❓ Status tidak dikenal: `{status}`"
+                
+            await msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
             return
-        match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
-        service_name = match.group(1).strip() if match else None
-        if not service_name:
-            await update.message.reply_text("❌ Format tombol tidak dikenali.")
+
+        if "shopeefood.co.id/tracker" in text or "shptools.my.id/sfood" in text:
+            await handle_sfood_message(update, ctx)
             return
-        kb_otp = await get_otp_keyboard()
-        await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
-        ctx.user_data['buy_service'] = service_name
-        ctx.user_data['buy_state'] = 'WAITING_QTY'
-        return
 
-    text_upper = text.upper()
-    if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
-        success, message, quota = db.use_voc(text_upper, user.id)
-        if success:
-            await update.message.reply_text(f"✅ *{message}*\n\nSekarang Balance kamu: *Rp {db.get_user(user.id)['saldo']:,}*.", parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text(f"❌ {message}")
-        return
+        if text == "☕ Cek Nomor Kopken":
+            await update.message.reply_text("Silakan kirim nomor HP yang mau dicek.\n\nContoh: `081234567890`", parse_mode=ParseMode.MARKDOWN)
+            ctx.user_data['cek_kopken_state'] = 'WAITING_PHONE'
+            return
 
-    await update.message.reply_text("❌ Format tidak dikenali.")
+        if text == "💰 Cek Balance":
+            await cmd_balance(update, ctx)
+            return
+
+        if text == "💳 Topup Balance":
+            await cmd_deposit(update, ctx)
+            return
+
+        if text == "📱 WhatsApp OTP":
+            await cmd_otp_menu(update, ctx)
+            return
+            
+        if text == "🔑 Redeem Invitation Code":
+            await update.message.reply_text("Silakan kirim kode Invitation / VOC kamu.\n\nFormat: `VOC-XXXXXX`", parse_mode=ParseMode.MARKDOWN)
+            return
+
+        if text == "🍔 ShopeeFood":
+            await cmd_sfood(update, ctx)
+            return
+
+        if text == "❓ Bantuan":
+            await cmd_help(update, ctx)
+            return
+
+        if text == "🔧 Admin Panel" and is_admin(user.id):
+            await cmd_admin(update, ctx)
+            return
+            
+        if text == "📥 Topup Log" and is_admin(user.id):
+            topups = db.get_recent_topups(10)
+            if not topups:
+                await update.message.reply_text("Belum ada topup.")
+                return
+            txt = "📥 *10 Topup Terakhir*\n\n"
+            import datetime as dtmod
+            for t in topups:
+                jam = dtmod.datetime.fromtimestamp(t['created_at']).strftime("%d/%m %H:%M")
+                txt += f"🟢 Rp {t['amount']:,} | User: `{t['user_id']}` | {jam}\n"
+            await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+            return
+
+        if text == "🆕 User Baru" and is_admin(user.id):
+            users = db.get_recent_users(10)
+            txt = "🆕 *10 User Terbaru*\n\n"
+            import datetime as dtmod
+            for u in users:
+                jam = dtmod.datetime.fromtimestamp(u['created_at']).strftime("%d/%m %H:%M")
+                uname = f"@{u['username']}" if u['username'] else "(no uname)"
+                txt += f"👤 `{u['user_id']}` | {u['first_name']} {uname} | {jam}\n"
+            await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+            return
+
+        if text == "🔙 Kembali ke Menu" or text == "🔙 Menu Utama":
+            kb = admin_keyboard() if is_admin(user.id) else main_keyboard()
+            balance = u['saldo'] if u and 'saldo' in u.keys() else 0
+            await update.message.reply_text(f"🏠 <b>Menu Utama</b>\n\n💰 Balance: <b>Rp {balance:,}</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+
+        if text == "📋 Cek Pesanan":
+            if not await require_whatsapp_access(update, ctx):
+                return
+            trxs = db.get_user_transactions(user.id, limit=15)
+            txt = "📜 <b>Riwayat Transaksi Kamu</b>\n\n"
+            
+            if not trxs:
+                txt += "<i>Belum ada transaksi.</i>"
+            else:
+                import datetime as dtmod
+                for t in trxs:
+                    try:
+                        dt = dtmod.datetime.strptime(t['created_at'], "%Y-%m-%d %H:%M:%S")
+                        jam = dt.strftime("%d/%m %H:%M")
+                    except:
+                        jam = "-"
+                        
+                    if t['amount'] > 0:
+                        txt += f"🟢 +Rp {t['amount']:,} | {t['description']} ({jam})\n"
+                    else:
+                        txt += f"🔴 -Rp {abs(t['amount']):,} | {t['description']} ({jam})\n"
+                        
+            await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+            return
+
+        if text.startswith("🛒 "):
+            if not await require_whatsapp_access(update, ctx):
+                return
+            match = re.match(r"🛒\s+(.+?)\s+\(\d+\)\s+-\s+[\d,]+", text)
+            service_name = match.group(1).strip() if match else None
+            if not service_name:
+                await update.message.reply_text("❌ Format tombol tidak dikenali.")
+                return
+            kb_otp = await get_otp_keyboard()
+            await update.message.reply_text(f"Berapa nomor <b>{service_name}</b> yang mau dibeli?\n\nKetik angka (contoh: 1)", parse_mode=ParseMode.HTML, reply_markup=kb_otp)
+            ctx.user_data['buy_service'] = service_name
+            ctx.user_data['buy_state'] = 'WAITING_QTY'
+            return
+
+        text_upper = text.upper()
+        if len(text_upper) >= 3 and re.match(r"^[A-Z0-9_-]+$", text_upper) and db.get_voc(text_upper):
+            success, message, quota = db.use_voc(text_upper, user.id)
+            if success:
+                await update.message.reply_text(f"✅ *{message}*\n\nSekarang Balance kamu: *Rp {db.get_user(user.id)['saldo']:,}*.", parse_mode=ParseMode.MARKDOWN)
+            else:
+                await update.message.reply_text(f"❌ {message}")
+            return
+
+        await update.message.reply_text("❌ Format tidak dikenali.")
+    except Exception as e:
+        logger.exception("Error di handle_message")
+        await update.message.reply_text(f"⚠️ Terjadi kesalahan sistem: {str(e)}")
 
 async def cmd_admin(update, ctx):
     if not is_admin(update.effective_user.id): return
