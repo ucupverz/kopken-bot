@@ -161,29 +161,57 @@ async def wait_for_payment(amount: int, qris_msg_id: int):
     if not API_ID or not API_HASH:
         return "error"
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
+    loop = asyncio.get_event_loop()
+    
+    # Timeout & interval
+    PAYMENT_WAIT_TIMEOUT = 300  # 5 menit
+    PAYMENT_POLL_INTERVAL = 5
+    TELEGRAM_CALL_TIMEOUT = 10
+
+    async def call_with_timeout(awaitable, timeout, detail):
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise asyncio.TimeoutError(detail) from exc
+
     try:
-        await client.connect()
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + 300
+        await call_with_timeout(
+            client.connect(), TELEGRAM_CONNECT_TIMEOUT, "Koneksi timeout."
+        )
+        if not await call_with_timeout(
+            client.is_user_authorized(), TELEGRAM_CALL_TIMEOUT, "Cek sesi timeout."
+        ):
+            return "error"
+
+        deadline = loop.time() + PAYMENT_WAIT_TIMEOUT
         cursor = qris_msg_id
+        
         while loop.time() < deadline:
-            await asyncio.sleep(5)
+            await asyncio.sleep(PAYMENT_POLL_INTERVAL)
             try:
-                msgs = await client.get_messages(
-                    DEHUYZ_BOT, min_id=cursor, limit=10, reverse=True
+                msgs = await call_with_timeout(
+                    client.get_messages(DEHUYZ_BOT, min_id=cursor, limit=10, reverse=True),
+                    TELEGRAM_CALL_TIMEOUT,
+                    "Telegram timeout saat cek pembayaran."
                 )
             except Exception:
                 continue
-            for msg in msgs:
+
+            for msg in msgs or []:
                 if msg.id > cursor:
                     cursor = msg.id
                 text = (msg.text or "").lower()
+                
+                # Dehuyz biasanya mengirim pesan "Saldo berhasil ditambahkan" atau "Topup berhasil"
                 if "berhasil" in text and "saldo" in text:
+                    # Cek apakah nominalnya cocok
                     if amount in _parse_amounts(text):
                         return "success"
         return "timeout"
+    except Exception:
+        return "error"
     finally:
         try:
-            await client.disconnect()
+            await asyncio.wait_for(client.disconnect(), timeout=5)
         except Exception:
             pass
