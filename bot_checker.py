@@ -7,9 +7,6 @@ import re
 import time
 import httpx
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Response
-from contextlib import asynccontextmanager
-import uvicorn
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -49,7 +46,6 @@ NASKY_API_KEY = os.getenv("NASKY_API_KEY", "")
 NASKY_BASE = "https://nasky.web.id"
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 DEFAULT_VOC_QUOTA = int(os.getenv("DEFAULT_VOC_QUOTA", "3"))
-WEBHOOK_URL = "https://okezones-bot.up.railway.app"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -210,7 +206,6 @@ async def handle_message(update, ctx):
         db.create_user(user.id, user.username or "", user.first_name or "")
     u = db.get_user(user.id)
 
-    # Navigation must win over pending input (including stale purchase states).
     if text in ("🔙 Kembali ke Menu", "🔙 Menu Utama", "Batal", "batal", "cancel"):
         clear_invite_flow(ctx)
         ctx.user_data.pop('deposit_state', None)
@@ -515,67 +510,24 @@ async def cmd_vocdetail(update, ctx):
 async def error_handler(update, ctx):
     logger.error(f"Error: {ctx.error}", exc_info=ctx.error)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global bot_app
-    await bot_app.initialize()
-    await bot_app.start()
-    await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/telegram-webhook", drop_pending_updates=True)
-    print(f"[TELEGRAM] Webhook diset ke: {WEBHOOK_URL}/telegram-webhook")
-    
-    asyncio.create_task(tracker_worker(bot_app.bot))
-    print("[SFOOD] Tracker worker started")
-    
-    asyncio.create_task(bg_check_stuck_orders(bot_app))
-    print("[CRON] Background refunder started")
-    yield
-    await bot_app.stop()
-    await bot_app.shutdown()
-
-api_app = FastAPI(lifespan=lifespan)
-
-@api_app.post("/telegram-webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.process_update(update)
-    return Response(status_code=200)
-
-@api_app.post("/wahub-webhook")
-async def wahub_webhook(request: Request):
-    data = await request.json()
-    print(f"[WEBHOOK] Menerima data: {data}")
-    order_id = str(data.get('order_id'))
-    otp = data.get('otp')
-    if order_id and otp:
-        asyncio.create_task(process_webhook_otp(order_id, otp))
-        return {"status": "success"}
-    return {"status": "ignored"}
-
-async def process_webhook_otp(order_id, otp):
-    order = db.get_otp_order(order_id)
-    if not order:
-        print(f"[WEBHOOK] Order {order_id} tidak ada di DB.")
-        return
-    db.update_otp_order_status(order_id, 'success', otp)
-    chat_id = order['user_id']
-    ui_text = (
-        f"✅ <b>Pesanan Selesai</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Order ID: <code>{order_id}</code>\n"
-        f"📱 Layanan: {order['service_name']}\n"
-        f"🔑 Kode OTP: <code>{otp}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
-    )
-    await bot_app.bot.send_message(chat_id=chat_id, text=ui_text, parse_mode=ParseMode.HTML)
-
 def main():
     global bot_app
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN belum di-set"); return
+        print("❌ BOT_TOKEN belum di-set")
+        return
     db.init_db()
+    
     bot_app = Application.builder().token(BOT_TOKEN).build()
+
+    async def on_startup(app: Application):
+        # Bersihkan webhook yang mungkin tersisa dari Railway
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        asyncio.create_task(tracker_worker(app.bot))
+        print("[SFOOD] Tracker worker started")
+        asyncio.create_task(bg_check_stuck_orders(app))
+        print("[CRON] Background refunder started")
+
+    bot_app.post_init = on_startup
     
     bot_app.add_handler(CommandHandler("start", cmd_start))
     bot_app.add_handler(CommandHandler("help", cmd_help))
@@ -614,16 +566,14 @@ def main():
     bot_app.add_handler(CallbackQueryHandler(handle_cek_kopken_callback, pattern=r"^otp_cekkopken_"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_filter_auto_cancel_callback, pattern=r"^otp_buyfilter_"))
     bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
-    
-    # Daftarin handler history yang sebelumnya error
-    from otp_handlers import handle_history_callback
     bot_app.add_handler(CallbackQueryHandler(handle_history_callback, pattern=r"^otp_history$"))
     
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    bot_app.add_error_handler(error_handler)
     
-    print("🌐 Web Server (FastAPI) jalan di port 8080")
-    uvicorn.run(api_app, host="0.0.0.0", port=8080, log_level="info")
+    print("🤖 Bot jalan dalam mode Long Polling...")
+    bot_app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
