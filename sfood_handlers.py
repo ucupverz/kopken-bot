@@ -1,3 +1,5 @@
+import html
+
 from telegram import Update, ReplyKeyboardMarkup, InputFile
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -16,6 +18,46 @@ def sfood_keyboard():
         ["🍔 Tambah Order", "📋 List Order"],
         ["❌ Stop Order", "🔙 Menu Utama"],
     ], resize_keyboard=True)
+
+
+async def cmd_sfood_stop_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    orders = db.sfood_get_orders_by_user(user.id)
+    if not orders:
+        await update.message.reply_text("📋 Tidak ada order aktif yang bisa dihentikan.")
+        return
+
+    ctx.user_data["sfood_stop_state"] = "WAITING_ORDER_ID"
+    order_lines = [f"• <code>{html.escape(str(order['order_id']))}</code> — {html.escape(str(order['label'] or '-'))}" for order in orders]
+    await update.message.reply_text(
+        "Kirim Order ID yang ingin dihentikan:\n\n" + "\n".join(order_lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def handle_sfood_stop_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ctx.user_data.get("sfood_stop_state") != "WAITING_ORDER_ID":
+        return False
+
+    user = update.effective_user
+    order_id = (update.message.text or "").strip()
+    active_orders = db.sfood_get_orders_by_user(user.id)
+    active_ids = {str(order["order_id"]) for order in active_orders}
+    if order_id not in active_ids:
+        await update.message.reply_text(
+            "❌ Order ID tidak ditemukan di daftar aktif kamu. Kirim salah satu ID di atas, atau tekan 🔙 Menu Utama untuk batal."
+        )
+        return True
+
+    ctx.user_data.pop("sfood_stop_state", None)
+    if db.sfood_stop_order(order_id, user_id=user.id):
+        await update.message.reply_text(
+            f"✅ Order <code>{html.escape(order_id)}</code> dihentikan.",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text("❌ Order tidak ditemukan atau sudah dihentikan.")
+    return True
 
 
 async def cmd_sfood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -164,10 +206,7 @@ async def handle_sfood_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         label = parsed["store_name"]
 
     # Cek jumlah order user SEBELUM tambah
-    with db.get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) as cnt FROM sfood_orders WHERE user_id = ?", (user.id,))
-        prev_count = c.fetchone()["cnt"]
+    prev_count = db.sfood_count_orders_by_user(user.id)
 
     db.sfood_add_order(
         user_id=user.id,

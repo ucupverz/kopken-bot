@@ -27,8 +27,8 @@ from otp_handlers import (
 )
 
 from sfood_handlers import (
-    cmd_sfood, cmd_sfood_list, cmd_sfood_stop,
-    cmd_sfood_stopall, handle_sfood_message
+    cmd_sfood, cmd_sfood_list, cmd_sfood_stop, cmd_sfood_stop_prompt,
+    handle_sfood_stop_message, cmd_sfood_stopall, handle_sfood_message
 )
 from sfood_tracker import tracker_worker
 from sfood_admin_handlers import (
@@ -210,9 +210,25 @@ async def handle_message(update, ctx):
         clear_invite_flow(ctx)
         ctx.user_data.pop('deposit_state', None)
         ctx.user_data.pop('cek_kopken_state', None)
+        ctx.user_data.pop('sfood_stop_state', None)
         await cmd_start(update, ctx)
         return
     if await handle_invite_message(update, ctx):
+        return
+
+    if text == "🍔 Tambah Order":
+        await cmd_sfood(update, ctx)
+        return
+
+    if text == "📋 List Order":
+        await cmd_sfood_list(update, ctx)
+        return
+
+    if text == "❌ Stop Order":
+        await cmd_sfood_stop_prompt(update, ctx)
+        return
+
+    if await handle_sfood_stop_message(update, ctx):
         return
 
     if text == "🛒 Beli Lagi":

@@ -882,15 +882,50 @@ async def process_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, amount
         return
     ctx.user_data['deposit_state'] = None 
     msg = await update.message.reply_text(f"⏳ Memproses QRIS untuk Rp {amount:,}...", parse_mode=ParseMode.HTML)
-    asyncio.create_task(process_qris_payment(ctx.bot, update.effective_chat.id, amount, ctx, is_direct_buy=False))
+    asyncio.create_task(process_qris_payment(
+        ctx.bot, update.effective_chat.id, amount, ctx,
+        is_direct_buy=False, status_message=msg,
+    ))
 
-async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
+async def _report_qris_failure(bot, chat_id, status_message, detail):
+    text = f"❌ Gagal membuat QRIS: {detail}"
+    if status_message is not None:
+        try:
+            await status_message.edit_text(text)
+            return
+        except Exception:
+            pass
+    await bot.send_message(chat_id, text)
+
+async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False,
+                               status_message=None):
     if is_direct_buy and not db.has_whatsapp_access(chat_id):
         await bot.send_message(chat_id, "Akses WhatsApp OTP belum aktif. Buka menu WhatsApp OTP dan redeem kode dari admin.")
         return
-    status, result = await dehuyz_automation.request_qris(amount)
-    if status == "error":
-        await bot.send_message(chat_id, f"❌ Gagal membuat QRIS: {result}")
+
+    try:
+        # Provider startup/connect can hang or fail before its own error handling.
+        # Bound this stage so a background task cannot leave the user at "Memproses" forever.
+        status, result = await asyncio.wait_for(
+            dehuyz_automation.request_qris(amount), timeout=90
+        )
+    except asyncio.TimeoutError:
+        logger.error("QRIS provider timed out for chat %s (amount %s)", chat_id, amount)
+        await _report_qris_failure(bot, chat_id, status_message,
+                                   "provider QRIS tidak merespons dalam 90 detik.")
+        return
+    except Exception as exc:
+        logger.exception("QRIS provider failed for chat %s", chat_id)
+        await _report_qris_failure(bot, chat_id, status_message,
+                                   f"terjadi kendala saat menghubungi provider ({exc}).")
+        return
+
+    if status != "success":
+        await _report_qris_failure(bot, chat_id, status_message, str(result))
+        return
+    if not isinstance(result, dict) or not result.get("image") or not result.get("msg_id"):
+        await _report_qris_failure(bot, chat_id, status_message,
+                                   "provider mengembalikan data QRIS yang tidak lengkap.")
         return
         
     qris_bytes = result["image"]
@@ -898,13 +933,28 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
     qris_msg_id = result["msg_id"] 
     
     keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
-    qris_msg = await bot.send_photo(
-        chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"), 
-        caption=caption_dehuy, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    try:
+        qris_msg = await bot.send_photo(
+            chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"),
+            caption=caption_dehuy, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as exc:
+        logger.exception("Failed to send generated QRIS to chat %s", chat_id)
+        await _report_qris_failure(bot, chat_id, status_message,
+                                   f"QRIS dibuat tetapi gagal dikirim ke chat ({exc}).")
+        return
     
     async def bg_wait_and_process():
-        is_paid_status = await dehuyz_automation.wait_for_payment(amount, qris_msg_id)
+        try:
+            is_paid_status = await asyncio.wait_for(
+                dehuyz_automation.wait_for_payment(amount, qris_msg_id), timeout=330
+            )
+        except asyncio.TimeoutError:
+            is_paid_status = "timeout"
+        except Exception:
+            logger.exception("QRIS payment status check failed for chat %s", chat_id)
+            is_paid_status = "error"
         if is_paid_status == "success":
             try:
                 await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"✅ <b>Topup Rp{amount:,} berhasil, balance sudah masuk.</b>", parse_mode=ParseMode.HTML, reply_markup=None)
@@ -954,6 +1004,17 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
             try:
                 await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"❌ <b>QRIS Kadaluarsa</b>", parse_mode=ParseMode.HTML, reply_markup=None)
             except Exception: pass
+        elif is_paid_status == "error":
+            try:
+                await bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=qris_msg.message_id,
+                    caption="⚠️ Status pembayaran belum dapat diverifikasi. Hubungi admin sebelum mencoba pembayaran ulang.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
 
     asyncio.create_task(bg_wait_and_process())
 

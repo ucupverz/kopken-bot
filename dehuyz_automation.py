@@ -25,11 +25,11 @@ async def request_qris(amount: int):
     if not API_ID or not API_HASH:
         return "error", "TG_API_ID / TG_API_HASH belum di-set!"
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
-    await client.connect()
-    if not await client.is_user_authorized():
-        await client.disconnect()
-        return "error", "Session expired."
     try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return "error", "Session expired."
+
         await client.send_message(DEHUYZ_BOT, "/topup")
         await asyncio.sleep(3)
 
@@ -69,14 +69,17 @@ async def request_qris(amount: int):
     except Exception as e:
         return "error", str(e)
     finally:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 async def wait_for_payment(amount: int, qris_msg_id: int):
     if not API_ID or not API_HASH:
         return "error"
     client = TelegramClient(StringSession(TG_SESSION_STR), API_ID, API_HASH)
-    await client.connect()
     try:
+        await client.connect()
         loop = asyncio.get_event_loop()
         deadline = loop.time() + 300
         cursor = qris_msg_id
@@ -97,4 +100,7 @@ async def wait_for_payment(amount: int, qris_msg_id: int):
                         return "success"
         return "timeout"
     finally:
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass

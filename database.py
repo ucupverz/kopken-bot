@@ -77,6 +77,18 @@ def init_db():
                     created_at INTEGER DEFAULT extract(epoch from now()),
                     used_by BIGINT,
                     used_at INTEGER
+                );""",
+                """CREATE TABLE IF NOT EXISTS sfood_orders (
+                    order_id TEXT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    code TEXT DEFAULT '',
+                    label TEXT DEFAULT '',
+                    last_status INTEGER DEFAULT 0,
+                    last_status_text TEXT DEFAULT '',
+                    last_eta TEXT DEFAULT '',
+                    last_driver TEXT DEFAULT '',
+                    last_driver_phone TEXT DEFAULT '',
+                    created_at BIGINT DEFAULT extract(epoch from now())
                 );"""
             ]
             for q in queries:
@@ -90,11 +102,124 @@ def init_db():
             CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, type TEXT NOT NULL, amount INTEGER NOT NULL, description TEXT DEFAULT '', created_at INTEGER DEFAULT (strftime('%s','now')));
             CREATE TABLE IF NOT EXISTS otp_orders (order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, token TEXT, phone TEXT, service_name TEXT, price INTEGER, status TEXT DEFAULT 'waiting', otp TEXT, msg_id INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')));
             CREATE TABLE IF NOT EXISTS voc_codes (code TEXT PRIMARY KEY, quota INTEGER NOT NULL, active INTEGER DEFAULT 1, created_by INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')), used_by INTEGER, used_at INTEGER);
+            CREATE TABLE IF NOT EXISTS sfood_orders (order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, code TEXT DEFAULT '', label TEXT DEFAULT '', last_status INTEGER DEFAULT 0, last_status_text TEXT DEFAULT '', last_eta TEXT DEFAULT '', last_driver TEXT DEFAULT '', last_driver_phone TEXT DEFAULT '', created_at INTEGER DEFAULT (strftime('%s','now')));
             """)
             otp_columns = {row[1] for row in conn.execute("PRAGMA table_info(otp_orders)").fetchall()}
             if "otp_history" not in otp_columns:
                 conn.execute("ALTER TABLE otp_orders ADD COLUMN otp_history TEXT DEFAULT '[]'")
     init_whatsapp_invites()
+
+def sfood_order_exists(order_id):
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute("SELECT 1 FROM sfood_orders WHERE order_id=%s", (str(order_id),))
+            return cur.fetchone() is not None
+        return ctx.execute("SELECT 1 FROM sfood_orders WHERE order_id=?", (str(order_id),)).fetchone() is not None
+
+def sfood_add_order(user_id, order_id, code, label, last_status=0,
+                    last_status_text='', last_eta='', last_driver='',
+                    last_driver_phone=''):
+    values = (str(order_id), user_id, code or '', label or '', last_status,
+              last_status_text or '', last_eta or '', last_driver or '',
+              last_driver_phone or '')
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                """INSERT INTO sfood_orders
+                   (order_id, user_id, code, label, last_status,
+                    last_status_text, last_eta, last_driver, last_driver_phone)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (order_id) DO NOTHING""",
+                values,
+            )
+            return cur.rowcount == 1
+        cur = ctx.execute(
+            """INSERT OR IGNORE INTO sfood_orders
+               (order_id, user_id, code, label, last_status,
+                last_status_text, last_eta, last_driver, last_driver_phone)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            values,
+        )
+        return cur.rowcount == 1
+
+def sfood_get_orders_by_user(user_id):
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                "SELECT * FROM sfood_orders WHERE user_id=%s AND last_status<>600 ORDER BY created_at DESC",
+                (user_id,),
+            )
+            return cur.fetchall()
+        return ctx.execute(
+            "SELECT * FROM sfood_orders WHERE user_id=? AND last_status<>600 ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
+
+def sfood_get_active_orders():
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute("SELECT * FROM sfood_orders WHERE last_status<>600 ORDER BY created_at")
+            return cur.fetchall()
+        return ctx.execute(
+            "SELECT * FROM sfood_orders WHERE last_status<>600 ORDER BY created_at"
+        ).fetchall()
+
+def sfood_count_orders_by_user(user_id):
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute("SELECT COUNT(*) AS cnt FROM sfood_orders WHERE user_id=%s", (user_id,))
+            return cur.fetchone()["cnt"]
+        row = ctx.execute("SELECT COUNT(*) AS cnt FROM sfood_orders WHERE user_id=?", (user_id,)).fetchone()
+        return row["cnt"]
+
+def sfood_stop_order(order_id, user_id):
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                "UPDATE sfood_orders SET last_status=600, last_status_text='Dihentikan' WHERE order_id=%s AND user_id=%s AND last_status<>600",
+                (str(order_id), user_id),
+            )
+            return cur.rowcount == 1
+        cur = ctx.execute(
+            "UPDATE sfood_orders SET last_status=600, last_status_text='Dihentikan' WHERE order_id=? AND user_id=? AND last_status<>600",
+            (str(order_id), user_id),
+        )
+        return cur.rowcount == 1
+
+def sfood_stop_all_user(user_id):
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                "UPDATE sfood_orders SET last_status=600, last_status_text='Dihentikan' WHERE user_id=%s AND last_status<>600",
+                (user_id,),
+            )
+            return cur.rowcount
+        cur = ctx.execute(
+            "UPDATE sfood_orders SET last_status=600, last_status_text='Dihentikan' WHERE user_id=? AND last_status<>600",
+            (user_id,),
+        )
+        return cur.rowcount
+
+def sfood_mark_order_finished(order_id):
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                "UPDATE sfood_orders SET last_status=600 WHERE order_id=%s AND last_status<>600",
+                (str(order_id),),
+            )
+        else:
+            ctx.execute(
+                "UPDATE sfood_orders SET last_status=600 WHERE order_id=? AND last_status<>600",
+                (str(order_id),),
+            )
 
 def create_user(user_id, username, first_name):
     with get_conn() as ctx:

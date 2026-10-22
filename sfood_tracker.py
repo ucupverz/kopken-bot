@@ -31,9 +31,8 @@ async def tracker_worker(bot):
                         pass
 
                     # SET status 600 (SELESAI) BIAR GA DI-LOOP LAGI
-                    with db.get_conn() as conn:
-                        conn.execute("UPDATE sfood_orders SET last_status = 600 WHERE order_id = ?", (order['order_id'],))
-                        print(f"[SFOOD] Pesanan {order['order_id']} selesai & dihapus dari antrean.")
+                    db.sfood_mark_order_finished(order['order_id'])
+                    print(f"[SFOOD] Pesanan {order['order_id']} selesai & dihapus dari antrean.")
             
             await asyncio.sleep(30)
             
