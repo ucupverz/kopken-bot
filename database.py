@@ -3,6 +3,7 @@ import time
 import datetime
 import hashlib
 import secrets
+import json
 from contextlib import contextmanager
 import psycopg2
 import psycopg2.extras
@@ -80,6 +81,8 @@ def init_db():
             ]
             for q in queries:
                 cursor.execute(q)
+            # Additive migration only: keep existing orders and user data intact.
+            cursor.execute("ALTER TABLE otp_orders ADD COLUMN IF NOT EXISTS otp_history TEXT DEFAULT '[]'")
         else:
             conn = ctx
             conn.executescript("""
@@ -88,6 +91,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS otp_orders (order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, token TEXT, phone TEXT, service_name TEXT, price INTEGER, status TEXT DEFAULT 'waiting', otp TEXT, msg_id INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')));
             CREATE TABLE IF NOT EXISTS voc_codes (code TEXT PRIMARY KEY, quota INTEGER NOT NULL, active INTEGER DEFAULT 1, created_by INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')), used_by INTEGER, used_at INTEGER);
             """)
+            otp_columns = {row[1] for row in conn.execute("PRAGMA table_info(otp_orders)").fetchall()}
+            if "otp_history" not in otp_columns:
+                conn.execute("ALTER TABLE otp_orders ADD COLUMN otp_history TEXT DEFAULT '[]'")
     init_whatsapp_invites()
 
 def create_user(user_id, username, first_name):
@@ -178,14 +184,76 @@ def set_order_msg_id(order_id, msg_id):
 
 def mark_success_if_waiting(order_id, otp):
     order_id = str(order_id)
+    history = json.dumps([str(otp)])
     with get_conn() as ctx:
         if DATABASE_URL:
             conn, cur = ctx
-            cur.execute("UPDATE otp_orders SET status='success', otp=%s WHERE order_id=%s AND status='waiting'", (otp, order_id))
+            cur.execute("UPDATE otp_orders SET status='success', otp=%s, otp_history=%s WHERE order_id=%s AND status='waiting'", (otp, history, order_id))
             return cur.rowcount == 1
         else:
-            cur = ctx.execute("UPDATE otp_orders SET status='success', otp=? WHERE order_id=? AND status='waiting'", (otp, order_id))
+            cur = ctx.execute("UPDATE otp_orders SET status='success', otp=?, otp_history=? WHERE order_id=? AND status='waiting'", (otp, history, order_id))
             return cur.rowcount == 1
+
+def get_otp_history(order_id):
+    order = get_otp_order(order_id)
+    if not order:
+        return []
+    raw = order['otp_history'] if 'otp_history' in order.keys() else None
+    try:
+        history = json.loads(raw or '[]')
+        if isinstance(history, list):
+            history = [str(code) for code in history if code is not None]
+            if history:
+                return history
+    except (TypeError, ValueError):
+        pass
+    otp = order['otp'] if 'otp' in order.keys() else None
+    return [str(otp)] if otp else []
+
+def append_otp_history(order_id, otp):
+    """Append a distinct OTP without losing earlier codes for this order."""
+    order_id = str(order_id)
+    otp = str(otp)
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute("SELECT otp_history, otp FROM otp_orders WHERE order_id=%s FOR UPDATE", (order_id,))
+            row = cur.fetchone()
+            if not row:
+                return []
+            try:
+                history = json.loads(row['otp_history'] or '[]')
+            except (TypeError, ValueError):
+                history = []
+            if not isinstance(history, list):
+                history = []
+            history = [str(code) for code in history if code is not None]
+            if not history and row['otp']:
+                history.append(str(row['otp']))
+            if otp not in history:
+                history.append(otp)
+            cur.execute("UPDATE otp_orders SET otp_history=%s WHERE order_id=%s", (json.dumps(history), order_id))
+            return history
+        else:
+            ctx.execute("BEGIN IMMEDIATE")
+            row = ctx.execute("SELECT otp_history, otp FROM otp_orders WHERE order_id=?", (order_id,)).fetchone()
+            if not row:
+                ctx.commit()
+                return []
+            try:
+                history = json.loads(row['otp_history'] or '[]')
+            except (TypeError, ValueError):
+                history = []
+            if not isinstance(history, list):
+                history = []
+            history = [str(code) for code in history if code is not None]
+            if not history and row['otp']:
+                history.append(str(row['otp']))
+            if otp not in history:
+                history.append(otp)
+            ctx.execute("UPDATE otp_orders SET otp_history=? WHERE order_id=?", (json.dumps(history), order_id))
+            ctx.commit()
+            return history
 
 def mark_status_if_waiting(order_id, new_status):
     order_id = str(order_id)

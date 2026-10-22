@@ -215,6 +215,10 @@ async def handle_message(update, ctx):
     if await handle_invite_message(update, ctx):
         return
 
+    if text == "🛒 Beli Lagi":
+        await cmd_otp_menu(update, ctx)
+        return
+
     if ctx.user_data.get('buy_state') == 'WAITING_QTY' and text.isdigit():
         qty = int(text)
         await process_direct_buy(update, ctx, qty)

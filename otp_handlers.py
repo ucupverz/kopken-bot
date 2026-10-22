@@ -120,17 +120,26 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_le
     if status == "Menunggu OTP":
         status_line = f"⏳ <b>Menunggu OTP</b>\n{timer_line}"
         otp_line = ""
+    elif status == "Menunggu OTP 2":
+        status_line = f"🔄 <b>Menunggu OTP #2</b>\n{timer_line}"
+        history = otp_history or ([otp] if otp != "-" else [])
+        otp_line = "".join(
+            f"🔑 Kode OTP #{idx}: <code>{html.escape(str(code))}</code>\n"
+            for idx, code in enumerate(history, 1)
+        )
     elif status == "Selesai":
         status_line = f"✅ <b>Pesanan Selesai</b>"
-        otp_line = f"🔑 Kode OTP: <code>{otp}</code>\n"
-        if otp2:
-            otp_line += f"🔑 Kode OTP 2: <code>{otp2}</code>\n"
+        history = otp_history or [code for code in (otp, otp2) if code and code != "-"]
+        otp_line = "".join(
+            f"🔑 Kode OTP #{idx}: <code>{html.escape(str(code))}</code>\n"
+            for idx, code in enumerate(history, 1)
+        )
     elif status == "OTP diterima":
         status_line = f"✅ <b>OTP diterima</b>\n⏳ {timer_line}"
         if otp_history is None:
             otp_history = [otp] if otp != "-" else []
         otp_line = "".join(
-            f"🔑 Kode OTP {idx}: <code>{html.escape(str(code))}</code>\n"
+            f"🔑 Kode OTP #{idx}: <code>{html.escape(str(code))}</code>\n"
             for idx, code in enumerate(otp_history, 1)
         )
     else:
@@ -148,24 +157,96 @@ def build_order_ui(order_id, service_name, phone, status="Menunggu OTP", time_le
         f"<i>Jangan bagikan kode ini ke siapa pun.</i>"
     )
 
-def get_order_inline_keyboard(status="Menunggu OTP"):
+def get_order_inline_keyboard(status="Menunggu OTP", order_id=None):
+    order_suffix = f":{order_id}" if order_id is not None else ""
     if status == "Menunggu OTP":
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🔄 Ganti Nomor", callback_data="otp_act_ganti"),
-                InlineKeyboardButton("❌ Batal & Refund", callback_data="otp_act_batal")
+                InlineKeyboardButton("🔄 Ganti Nomor", callback_data=f"otp_act_ganti{order_suffix}"),
+                InlineKeyboardButton("❌ Batal & Refund", callback_data=f"otp_act_batal{order_suffix}")
             ],
             [
-                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data="otp_act_resend")
+                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act_resend{order_suffix}")
             ]
         ])
     else:
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data="otp_act_resend"),
-                InlineKeyboardButton("✅ Selesai", callback_data="otp_act_selesai")
+                InlineKeyboardButton("🔄 Kirim Ulang OTP", callback_data=f"otp_act_resend{order_suffix}"),
+                InlineKeyboardButton("✅ Selesai", callback_data=f"otp_act_selesai{order_suffix}")
             ]
         ])
+
+
+def _runtime_orders(ctx):
+    # Application-scoped: menu navigation and user_data cleanup must not detach
+    # a live timer/poller from its order.
+    return ctx.bot_data.setdefault("otp_runtime_orders", {})
+
+
+def _start_order_workers(ctx, user_id, msg_id, order_id, service_name, phone, total_time=1200):
+    order_id = str(order_id)
+    db.set_order_msg_id(order_id, msg_id)
+    runtime = _runtime_orders(ctx)
+    previous = runtime.get(order_id)
+    if previous and previous.get("stop_event"):
+        previous["stop_event"].set()
+    order_state = {
+        "started_at": time.monotonic(),
+        "otp_history": db.get_otp_history(order_id),
+        "waiting_for_next_otp": False,
+        "stop_event": asyncio.Event(),
+        "tasks": [],
+    }
+    runtime[order_id] = order_state
+    order_state["tasks"] = [
+        asyncio.create_task(run_timer(ctx.bot, user_id, msg_id, order_id, service_name, phone, total_time, order_state)),
+        asyncio.create_task(poll_otp_bg(ctx.bot, user_id, order_id, db.get_otp_order(order_id)["token"], service_name, msg_id, phone, order_state)),
+    ]
+    return order_state
+
+
+async def _stop_order_workers(ctx, order_id):
+    order_state = _runtime_orders(ctx).get(str(order_id))
+    if not order_state:
+        return
+    order_state["stop_event"].set()
+    tasks = [task for task in order_state.get("tasks", []) if task and not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _runtime_orders(ctx).pop(str(order_id), None)
+
+
+def _callback_order(query, ctx, user):
+    """Resolve the order from callback data and the card message, never the current last_order."""
+    data = query.data or ""
+    action_part, separator, order_id = data.partition(":")
+    if not separator or not order_id:
+        # Legacy buttons are accepted only when the current card message matches.
+        last_order = ctx.user_data.get("last_order") or {}
+        if not last_order or last_order.get("msg_id") != getattr(query.message, "message_id", None):
+            return None, None
+        order_id = str(last_order.get("order_id", ""))
+    order = db.get_otp_order(order_id)
+    if not order or int(order["user_id"]) != int(user.id):
+        return None, None
+    card_msg_id = getattr(query.message, "message_id", None)
+    stored_msg_id = order["msg_id"] if "msg_id" in order.keys() else None
+    if stored_msg_id is not None and card_msg_id != stored_msg_id:
+        return None, None
+    return action_part.replace("otp_act_", "", 1), {
+        "order_id": str(order["order_id"]),
+        "token": order["token"],
+        "phone": order["phone"],
+        "service": order["service_name"],
+        "price": order["price"],
+        "msg_id": stored_msg_id or card_msg_id,
+        "status": order["status"],
+        "otp": order["otp"],
+        "user_id": order["user_id"],
+    }
 
 async def cmd_otp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await require_whatsapp_access(update, ctx):
@@ -260,14 +341,12 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
     ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "time_left": 1200}
     
     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
-    msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
+    msg_ui = await update.message.reply_text(ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP", oid))
     
     ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
     ctx.user_data['ui_msg_id'] = msg_ui.message_id
     
-    order_state = {"started_at": time.monotonic(), "otp_history": []}
-    asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, oid, display_name, ph, 1200, order_state))
-    asyncio.create_task(poll_otp_bg(ctx.bot, user.id, oid, tkn, display_name, msg_ui.message_id, ph, order_state))
+    _start_order_workers(ctx, user.id, msg_ui.message_id, oid, display_name, ph)
     
     if len(numbers_bought) > 1:
         info_txt = f"✅ Berhasil membeli {len(numbers_bought)} nomor.\n\n"
@@ -279,11 +358,9 @@ async def process_direct_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty
                     chat_id=user.id, 
                     text=build_order_ui(o, display_name, p, "Menunggu OTP", 1200), 
                     parse_mode=ParseMode.HTML, 
-                    reply_markup=get_order_inline_keyboard("Menunggu OTP")
+                    reply_markup=get_order_inline_keyboard("Menunggu OTP", o)
                 )
-                order_state = {"started_at": time.monotonic(), "otp_history": []}
-                asyncio.create_task(run_timer(ctx.bot, user.id, sub_msg.message_id, o, display_name, p, 1200, order_state))
-                asyncio.create_task(poll_otp_bg(ctx.bot, user.id, o, t, display_name, sub_msg.message_id, p, order_state))
+                _start_order_workers(ctx, user.id, sub_msg.message_id, o, display_name, p)
         await ctx.bot.send_message(chat_id=user.id, text=info_txt, parse_mode=ParseMode.HTML)
 
     if "kopken" in api_name.lower() and "filter" not in api_name.lower():
@@ -301,17 +378,26 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
         order_state = {}
     order_state.setdefault("started_at", time.monotonic())
     order_state.setdefault("otp_history", [])
+    order_state.setdefault("waiting_for_next_otp", False)
+    stop_event = order_state.get("stop_event")
     start_time = order_state["started_at"]
 
-    while True:
+    while not (stop_event and stop_event.is_set()):
         await asyncio.sleep(5)
+        if stop_event and stop_event.is_set():
+            return
         order = db.get_otp_order(order_id)
         if not order or order['status'] not in ('waiting', 'success'):
             return
 
         elapsed = int(time.monotonic() - start_time)
         time_left = max(0, total_time - elapsed)
-        status = "OTP diterima" if order['status'] == 'success' else "Menunggu OTP"
+        order_state["otp_history"] = db.get_otp_history(order_id)
+        status = (
+            "Menunggu OTP 2" if order['status'] == 'success' and order_state["waiting_for_next_otp"]
+            else "OTP diterima" if order['status'] == 'success'
+            else "Menunggu OTP"
+        )
         ui_text = build_order_ui(
             order_id, service_name, phone, status, time_left,
             otp_history=order_state["otp_history"]
@@ -322,7 +408,7 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
                 message_id=msg_id,
                 text=ui_text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_order_inline_keyboard(status),
+                reply_markup=get_order_inline_keyboard(status, order_id),
             )
         except Exception as exc:
             # Jangan diam-diam membuat UI hilang; polling OTP tetap berjalan.
@@ -336,17 +422,20 @@ async def run_timer(bot, chat_id, msg_id, order_id, service_name, phone, total_t
 # === POLLING OTP ===
 async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone, order_state=None):
     db_order = db.get_otp_order(order_id)
-    if not db_order or db_order['status'] != 'waiting':
+    if not db_order or db_order['status'] not in ('waiting', 'success'):
         return
 
     if order_state is None:
         order_state = {}
     order_state.setdefault("started_at", time.monotonic())
     order_state.setdefault("otp_history", [])
+    order_state.setdefault("waiting_for_next_otp", False)
+    stop_event = order_state.get("stop_event")
+    order_state["otp_history"] = db.get_otp_history(order_id)
     otp_history = order_state["otp_history"]
     start_time = order_state["started_at"]
 
-    while time.monotonic() - start_time < 1200:
+    while time.monotonic() - start_time < 1200 and not (stop_event and stop_event.is_set()):
         db_order = db.get_otp_order(order_id)
         if not db_order or db_order['status'] not in ('waiting', 'success'):
             return
@@ -365,18 +454,18 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                 continue
 
             otp_baru = str(otp_baru)
+            otp_history[:] = db.get_otp_history(order_id)
             if otp_baru not in otp_history:
                 first_otp = not otp_history
                 # CAS mencegah OTP yang datang bersamaan dengan pembatalan
                 # mengubah order yang sudah dibatalkan kembali menjadi sukses.
                 if first_otp and not db.mark_success_if_waiting(order_id, otp_baru):
                     return
-                otp_history.append(otp_baru)
                 if first_otp:
-                    try:
-                        await wahub_client.mark_done(order_id)
-                    except Exception as exc:
-                        logger.warning("Gagal menandai order %s selesai di provider: %s", order_id, exc)
+                    otp_history[:] = db.get_otp_history(order_id)
+                else:
+                    otp_history[:] = db.append_otp_history(order_id, otp_baru)
+                order_state["waiting_for_next_otp"] = False
 
                 elapsed = int(time.monotonic() - start_time)
                 time_left = max(0, 1200 - elapsed)
@@ -390,12 +479,15 @@ async def poll_otp_bg(bot, user_id, order_id, token, service_name, msg_id, phone
                         message_id=msg_id,
                         text=ui_text,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=get_order_inline_keyboard("OTP diterima"),
+                    reply_markup=get_order_inline_keyboard("OTP diterima", order_id),
                     )
                 except Exception as exc:
                     logger.warning("Gagal memperbarui pesan OTP order %s: %s", order_id, exc)
 
         await asyncio.sleep(15)
+
+    if stop_event and stop_event.is_set():
+        return
 
     db_order = db.get_otp_order(order_id)
     if not db_order or db_order['status'] != 'waiting':
@@ -491,41 +583,114 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
         return
     query = update.callback_query
     user = update.effective_user
-    action = query.data.replace("otp_act_", "", 1)
+    action, order = _callback_order(query, ctx, user)
+    if not order or action not in ("batal", "ganti", "resend", "selesai"):
+        await query.answer("Pesanan ini tidak lagi tersedia.", show_alert=True)
+        return
 
     if action in ("batal", "ganti") and ctx.user_data.get('otp_action_busy'):
         await query.answer("Aksi pesanan sedang diproses.", show_alert=True)
         return
-
     await query.answer()
 
+    order_id = order["order_id"]
+    runtime = _runtime_orders(ctx).get(order_id)
+    if runtime is None and order["status"] in ("waiting", "success"):
+        runtime = _start_order_workers(
+            ctx, user.id, order["msg_id"], order_id, order["service"], order["phone"]
+        )
+        created_at = db.get_otp_order(order_id)["created_at"]
+        if created_at:
+            elapsed = max(0, int(time.time() - float(created_at)))
+            runtime["started_at"] = time.monotonic() - elapsed
+
     if action == "selesai":
-        last_order = ctx.user_data.get('last_order')
-        if last_order:
+        current_order = db.get_otp_order(order_id)
+        if current_order and current_order["status"] == "success":
             try:
-                current_order = db.get_otp_order(last_order['order_id'])
-                if current_order and current_order['status'] == 'success':
-                    db.update_otp_order_status(last_order['order_id'], 'completed')
-                if ctx.user_data.get('last_order', {}).get('order_id') == last_order['order_id']:
-                    ctx.user_data['last_order'] = None
+                await wahub_client.mark_done(order_id)
             except Exception as exc:
-                logger.warning("Gagal menutup order OTP %s: %s", last_order.get('order_id'), exc)
+                logger.warning("Gagal menandai order %s selesai di provider: %s", order_id, exc)
+            db.update_otp_order_status(order_id, "completed")
+        if runtime:
+            runtime["otp_history"] = db.get_otp_history(order_id)
+        history = runtime["otp_history"] if runtime else db.get_otp_history(order_id)
         try:
-            await query.delete_message()
-        except Exception:
-            pass
+            await query.edit_message_text(
+                build_order_ui(
+                    order_id, order["service"], order["phone"], "Selesai",
+                    otp_history=history,
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=None,
+            )
+        except Exception as exc:
+            logger.warning("Gagal memperbarui kartu order selesai %s: %s", order_id, exc)
+        await _stop_order_workers(ctx, order_id)
+        if ctx.user_data.get("last_order", {}).get("order_id") == order_id:
+            ctx.user_data["last_order"] = None
+        await ctx.bot.send_message(
+            chat_id=user.id,
+            text="Pilih menu berikutnya:",
+            reply_markup=ReplyKeyboardMarkup(
+                [["🛒 Beli Lagi", "📋 Cek Pesanan"], ["🔙 Menu Utama"]],
+                resize_keyboard=True,
+            ),
+        )
         return
 
-    last_order = ctx.user_data.get('last_order')
-    if not last_order:
+    if action == "resend":
+        if not runtime:
+            runtime = _runtime_orders(ctx).get(order_id)
+        if runtime:
+            runtime["waiting_for_next_otp"] = True
+            runtime["otp_history"] = db.get_otp_history(order_id)
+        waiting_text = build_order_ui(
+            order_id, order["service"], order["phone"], "Menunggu OTP 2",
+            max(0, 1200 - int(time.monotonic() - runtime["started_at"])) if runtime else 1200,
+            otp_history=runtime["otp_history"] if runtime else db.get_otp_history(order_id),
+        )
         try:
-            await query.edit_message_text("❌ Tidak ada pesanan aktif yang bisa diproses.")
-        except Exception:
-            await ctx.bot.send_message(chat_id=user.id, text="❌ Tidak ada pesanan aktif yang bisa diproses.")
+            await query.edit_message_text(
+                waiting_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_order_inline_keyboard("Menunggu OTP 2", order_id),
+            )
+        except Exception as exc:
+            logger.warning("Gagal menampilkan status resend order %s: %s", order_id, exc)
+        try:
+            res, code = await wahub_client.retry_otp(order["token"])
+        except Exception as exc:
+            logger.exception("Gagal meminta OTP ulang order %s", order_id)
+            code = None
+            if runtime:
+                runtime["waiting_for_next_otp"] = False
+            text = f"❌ Permintaan OTP ulang gagal: <code>{html.escape(str(exc))}</code>"
+        else:
+            if code == 200:
+                text = "🔄 Menunggu OTP #2. Kode pertama tetap tersimpan di kartu ini."
+            else:
+                if runtime:
+                    runtime["waiting_for_next_otp"] = False
+                detail = (res or {}).get("message") or (res or {}).get("error") or "Batas retry mungkin habis atau waktu sewa selesai."
+                text = f"❌ Gagal meminta OTP ulang: <code>{html.escape(str(detail))}</code>"
+        if code != 200:
+            status = "OTP diterima" if (runtime and runtime["otp_history"]) else "Menunggu OTP"
+            try:
+                await query.edit_message_text(
+                    build_order_ui(
+                        order_id, order["service"], order["phone"], status,
+                        max(0, 1200 - int(time.monotonic() - runtime["started_at"])) if runtime else 1200,
+                        otp_history=runtime["otp_history"] if runtime else db.get_otp_history(order_id),
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_order_inline_keyboard(status, order_id),
+                )
+            except Exception as exc:
+                logger.warning("Gagal mengembalikan kartu order %s setelah resend gagal: %s", order_id, exc)
         return
 
     if action == "batal":
-        order_id = last_order['order_id']
         ctx.user_data['otp_action_busy'] = True
         try:
             try:
@@ -536,9 +701,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
                 logger.warning("Tidak bisa menampilkan status batal order %s: %s", order_id, exc)
 
             try:
-                res, code = await asyncio.wait_for(
-                    wahub_client.cancel_order(order_id), timeout=25
-                )
+                res, code = await asyncio.wait_for(wahub_client.cancel_order(order_id), timeout=25)
             except Exception as exc:
                 logger.exception("Permintaan batal order %s gagal", order_id)
                 res, code = {"message": str(exc)}, None
@@ -551,10 +714,7 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
                     f"Alasan: <code>{html.escape(str(detail))}</code>\n"
                     "Pesanan tetap tercatat agar tidak terjadi refund palsu."
                 )
-                try:
-                    await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-                except Exception:
-                    await ctx.bot.send_message(chat_id=user.id, text=text, parse_mode=ParseMode.HTML)
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML)
                 return
 
             try:
@@ -568,12 +728,10 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
                     "Jangan tekan batal lagi; admin perlu memeriksa saldo/order.\n"
                     f"Detail: {html.escape(str(exc))}"
                 )
-                try:
-                    await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-                except Exception:
-                    await ctx.bot.send_message(chat_id=user.id, text=text, parse_mode=ParseMode.HTML)
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML)
                 return
             if changed:
+                await _stop_order_workers(ctx, order_id)
                 if ctx.user_data.get('last_order', {}).get('order_id') == order_id:
                     ctx.user_data['last_order'] = None
                 text = f"✅ Pesanan dibatalkan dan refund Rp {refund:,} sudah masuk ke balance."
@@ -582,17 +740,11 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
                 status_now = current['status'] if current else "tidak ditemukan"
                 text = (
                     "ℹ️ Penyedia menerima pembatalan, tetapi order sudah diproses sebelumnya. "
-                    f"Status database: <code>{status_now}</code>. Tidak ada refund kedua."
+                    f"Status database: <code>{html.escape(str(status_now))}</code>. Tidak ada refund kedua."
                 )
-
-            try:
-                await query.edit_message_text(text, parse_mode=ParseMode.HTML)
-            except Exception:
-                await ctx.bot.send_message(chat_id=user.id, text=text, parse_mode=ParseMode.HTML)
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML)
             await ctx.bot.send_message(
-                chat_id=user.id,
-                text="Menu OTP:",
-                reply_markup=await get_otp_keyboard(),
+                chat_id=user.id, text="Menu OTP:", reply_markup=await get_otp_keyboard()
             )
         finally:
             ctx.user_data['otp_action_busy'] = False
@@ -601,33 +753,16 @@ async def handle_order_action_callback(update: Update, ctx: ContextTypes.DEFAULT
     if action == "ganti":
         ctx.user_data['otp_action_busy'] = True
         try:
-            await handle_ganti_nomor_inline(update, ctx)
+            await handle_ganti_nomor_inline(update, ctx, order=order)
         finally:
             ctx.user_data['otp_action_busy'] = False
-        return
 
-    if action == "resend":
-        try:
-            res, code = await wahub_client.retry_otp(last_order['token'])
-            text = (
-                "✅ Permintaan OTP ulang dikirim. Mohon tunggu SMS/WA masuk."
-                if code == 200 else
-                "❌ Gagal meminta OTP ulang. Batas retry mungkin habis atau waktu sewa selesai."
-            )
-        except Exception as exc:
-            logger.exception("Gagal meminta OTP ulang order %s", last_order.get('order_id'))
-            text = f"❌ Permintaan OTP ulang gagal: <code>{html.escape(str(exc))}</code>"
-        try:
-            await ctx.bot.send_message(chat_id=user.id, text=text, parse_mode=ParseMode.HTML)
-        except Exception as exc:
-            logger.warning("Tidak bisa mengirim status resend: %s", exc)
-
-async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE, order=None):
     if not await require_whatsapp_access(update, ctx):
         return
     query = update.callback_query
     user = update.effective_user
-    last_order = ctx.user_data.get('last_order')
+    last_order = order or ctx.user_data.get('last_order')
 
     async def show_status(text):
         try:
@@ -693,6 +828,8 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
         await show_status(f"ℹ️ Order lama sudah diproses ({status_now}); nomor baru tidak dibuat dan tidak ada refund kedua.")
         return
 
+    await _stop_order_workers(ctx, order_id_lama)
+
     if ctx.user_data.get('last_order', {}).get('order_id') == order_id_lama:
         ctx.user_data['last_order'] = None
 
@@ -717,13 +854,11 @@ async def handle_ganti_nomor_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
 
         ui_text = build_order_ui(new_oid, display_name, new_ph, "Menunggu OTP", 1200)
 
-        msg_ui = await ctx.bot.send_message(chat_id=user.id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
+        msg_ui = await ctx.bot.send_message(chat_id=user.id, text=ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP", new_oid))
         ctx.user_data['ui_msg_id'] = msg_ui.message_id
         ctx.user_data['last_order']['msg_id'] = msg_ui.message_id
 
-        order_state = {"started_at": time.monotonic(), "otp_history": []}
-        asyncio.create_task(run_timer(ctx.bot, user.id, msg_ui.message_id, new_oid, display_name, new_ph, 1200, order_state))
-        asyncio.create_task(poll_otp_bg(ctx.bot, user.id, new_oid, new_tkn, display_name, msg_ui.message_id, new_ph, order_state))
+        _start_order_workers(ctx, user.id, msg_ui.message_id, new_oid, display_name, new_ph)
 
         if "kopken" in api_name.lower() and "filter" not in api_name.lower():
             promo_txt = f"💡 Nomor <code>{new_ph}</code> siap. Mau cek status Kopkennya sekarang?\n"
@@ -800,12 +935,10 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False):
                     
                     ui_text = build_order_ui(oid, display_name, ph, "Menunggu OTP", 1200)
                     
-                    msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP"))
+                    msg_ui = await bot.send_message(chat_id, ui_text, parse_mode=ParseMode.HTML, reply_markup=get_order_inline_keyboard("Menunggu OTP", oid))
                     ctx.user_data['last_order'] = {"order_id": oid, "token": tkn, "phone": ph, "service": display_name, "price": harga_satuan, "msg_id": msg_ui.message_id}
                     
-                    order_state = {"started_at": time.monotonic(), "otp_history": []}
-                    asyncio.create_task(run_timer(bot, chat_id, msg_ui.message_id, oid, display_name, ph, 1200, order_state))
-                    asyncio.create_task(poll_otp_bg(bot, chat_id, oid, tkn, display_name, msg_ui.message_id, ph, order_state))
+                    _start_order_workers(ctx, chat_id, msg_ui.message_id, oid, display_name, ph)
                 else:
                     err_msg = res.get('message') or res.get('error') or "Unknown error"
                     db.add_saldo(chat_id, amount, "Refund Gagal Order")
