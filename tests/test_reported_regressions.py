@@ -72,6 +72,114 @@ def test_qris_provider_connect_failure_is_returned_and_client_cleaned_up():
     assert client.disconnect_called
 
 
+def test_qris_provider_finds_delayed_custom_reply_among_new_messages():
+    class Button:
+        text = "Custom Nominal"
+
+        def __init__(self):
+            self.clicked = False
+
+        async def click(self):
+            self.clicked = True
+
+    button = Button()
+    unrelated = SimpleNamespace(id=11, out=False, buttons=None)
+    reply = SimpleNamespace(id=12, out=False, buttons=[[button]])
+    qris = SimpleNamespace(id=14, out=False, photo=object(), text="QRIS caption")
+
+    class Client:
+        def __init__(self, *args):
+            self.responses = [[], [unrelated], [reply], [qris]]
+            self.request_ids = []
+            self.sent = []
+
+        async def connect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def send_message(self, peer, text):
+            self.sent.append(text)
+            return SimpleNamespace(id=len(self.sent), out=True)
+
+        async def get_messages(self, peer, **kwargs):
+            self.request_ids.append(kwargs["min_id"])
+            return self.responses.pop(0)
+
+        async def download_media(self, message, as_bytes):
+            return b"stub qris image"
+
+        async def disconnect(self):
+            pass
+
+    client = Client()
+    with patch.object(dehuyz_automation, "API_ID", 1), \
+         patch.object(dehuyz_automation, "API_HASH", "stub"), \
+         patch.object(dehuyz_automation, "TG_SESSION_STR", ""), \
+         patch.object(dehuyz_automation, "TelegramClient", return_value=client), \
+         patch.object(dehuyz_automation.asyncio, "sleep", new=AsyncMock()):
+        status, result = run(dehuyz_automation.request_qris(20000))
+
+    assert status == "success"
+    assert result == {
+        "image": b"stub qris image",
+        "caption": "QRIS caption",
+        "msg_id": 14,
+    }
+    assert client.sent == ["/topup", "20000"]
+    assert button.clicked
+    assert client.request_ids[:3] == [1, 1, 1]
+    assert client.request_ids[-1] == 2
+
+
+def test_qris_provider_bounds_stalled_disconnect_cleanup():
+    class Client:
+        async def connect(self):
+            raise RuntimeError("local stub connect failure")
+
+        async def disconnect(self):
+            await asyncio.Event().wait()
+
+    client = Client()
+    with patch.object(dehuyz_automation, "API_ID", 1), \
+         patch.object(dehuyz_automation, "API_HASH", "stub"), \
+         patch.object(dehuyz_automation, "TelegramClient", return_value=client), \
+         patch.object(dehuyz_automation, "TELEGRAM_DISCONNECT_TIMEOUT", 0.01):
+        status, detail = run(dehuyz_automation.request_qris(20000))
+
+    assert status == "error"
+    assert "local stub connect failure" in detail
+
+
+def test_qris_provider_reports_missing_topup_response_after_bounded_wait():
+    class Client:
+        async def connect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return True
+
+        async def send_message(self, peer, text):
+            return SimpleNamespace(id=1, out=True)
+
+        async def get_messages(self, peer, **kwargs):
+            return []
+
+        async def disconnect(self):
+            pass
+
+    with patch.object(dehuyz_automation, "API_ID", 1), \
+         patch.object(dehuyz_automation, "API_HASH", "stub"), \
+         patch.object(dehuyz_automation, "TelegramClient", return_value=Client()), \
+         patch.object(dehuyz_automation, "DEHUYZ_REPLY_TIMEOUT", 0.01), \
+         patch.object(dehuyz_automation, "DEHUYZ_POLL_INTERVAL", 0.002):
+        status, detail = run(dehuyz_automation.request_qris(20000))
+
+    assert status == "error"
+    assert "tidak menampilkan tombol Custom/Nominal" in detail
+
+
 def test_topup_provider_failure_updates_processing_message():
     status_message = SimpleNamespace(edit_text=AsyncMock())
     bot = SimpleNamespace(send_message=AsyncMock())
