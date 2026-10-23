@@ -904,8 +904,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False,
         return
 
     try:
-        # Provider startup/connect can hang or fail before its own error handling.
-        # Bound this stage so a background task cannot leave the user at "Memproses" forever.
         status, result = await asyncio.wait_for(
             dehuyz_automation.request_qris(amount), timeout=90
         )
@@ -932,18 +930,42 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False,
     caption_dehuy = result["caption"]
     qris_msg_id = result["msg_id"] 
     
+    # Hapus pesan "Memproses" agar tidak menumpuk
+    if status_message is not None:
+        try:
+            await status_message.delete()
+        except Exception:
+            pass
+
     keyboard = [[InlineKeyboardButton("🔄 Cek Status", callback_data=f"cekstatus_{amount}")]]
+    
+    # Tangani error jika caption terlalu panjang atau mengandung HTML aneh dari Dehuyz
+    caption_safe = (caption_dehuy or "")[:1024]
+    if len(caption_safe) == 1024:
+        caption_safe = caption_safe[:1020] + "..."
+
+    qris_msg = None
     try:
+        # Coba kirim dengan HTML parse_mode
         qris_msg = await bot.send_photo(
             chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"),
-            caption=caption_dehuy, parse_mode=ParseMode.HTML,
+            caption=caption_safe, parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as exc:
-        logger.exception("Failed to send generated QRIS to chat %s", chat_id)
-        await _report_qris_failure(bot, chat_id, status_message,
-                                   f"QRIS dibuat tetapi gagal dikirim ke chat ({exc}).")
-        return
+        logger.warning("Gagal kirim QRIS pakai HTML caption, coba tanpa HTML: %s", exc)
+        try:
+            # Jika gagal karena HTML, kirim sebagai teks biasa
+            qris_msg = await bot.send_photo(
+                chat_id=chat_id, photo=InputFile(qris_bytes, filename="qris.jpg"),
+                caption=caption_safe, parse_mode=None,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as exc2:
+            logger.error("Gagal total kirim QRIS ke chat %s: %s", chat_id, exc2)
+            await _report_qris_failure(bot, chat_id, None,
+                                       f"QRIS dibuat tetapi gagal dikirim ke chat ({exc2}).")
+            return
     
     async def bg_wait_and_process():
         try:
@@ -964,6 +986,7 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False,
             logger.exception("QRIS payment status check failed for chat %s", chat_id)
             is_paid_status = "error"
             provider_payment_id = None
+            
         if is_paid_status == "success":
             if not is_direct_buy:
                 try:
