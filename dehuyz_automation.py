@@ -21,6 +21,7 @@ DEHUYZ_QRIS_TIMEOUT = 45
 DEHUYZ_POLL_INTERVAL = 1
 QRIS_POLL_INTERVAL = 3
 TELEGRAM_DISCONNECT_TIMEOUT = 3
+_QRIS_REQUEST_LOCK = asyncio.Lock()
 
 def _parse_amounts(text):
     out = set()
@@ -33,6 +34,13 @@ def _parse_amounts(text):
     return out
 
 async def request_qris(amount: int):
+    # Dehuyz has one shared chat state for this account. Serialize the
+    # /topup -> custom button -> amount -> QRIS exchange across users.
+    async with _QRIS_REQUEST_LOCK:
+        return await _request_qris(amount)
+
+
+async def _request_qris(amount: int):
     if not API_ID or not API_HASH:
         logger.error("TG_API_ID atau TG_API_HASH kosong!")
         return "error", "TG_API_ID / TG_API_HASH belum di-set!"
@@ -176,6 +184,20 @@ async def wait_for_payment(amount: int, qris_msg_id: int):
         while loop.time() < deadline:
             await asyncio.sleep(PAYMENT_POLL_INTERVAL)
             try:
+                # Some providers edit the QRIS message itself on payment,
+                # which a min_id-only query would never return.
+                original = await call_with_timeout(
+                    client.get_messages(DEHUYZ_BOT, ids=qris_msg_id),
+                    TELEGRAM_CALL_TIMEOUT, "Telegram timeout saat membaca status QRIS."
+                )
+                if isinstance(original, (list, tuple)):
+                    original = original[0] if original else None
+                if original is not None:
+                    text = (getattr(original, "text", "") or "").lower()
+                    if "berhasil" in text and "saldo" in text and amount in _parse_amounts(text):
+                        logger.info("Pembayaran sukses terdeteksi pada pesan QRIS %s", qris_msg_id)
+                        return "success", int(original.id)
+
                 msgs = await call_with_timeout(
                     client.get_messages(DEHUYZ_BOT, min_id=cursor, limit=10, reverse=True),
                     TELEGRAM_CALL_TIMEOUT, "Telegram timeout saat cek pembayaran."
@@ -191,7 +213,7 @@ async def wait_for_payment(amount: int, qris_msg_id: int):
                 if "berhasil" in text and "saldo" in text:
                     if amount in _parse_amounts(text):
                         logger.info("Pembayaran sukses dideteksi untuk amount %s", amount)
-                        return "success"
+                        return "success", int(msg.id)
         return "timeout"
     except Exception:
         logger.exception("Error wait_for_payment")

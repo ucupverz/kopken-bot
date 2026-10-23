@@ -89,6 +89,12 @@ def init_db():
                     last_driver TEXT DEFAULT '',
                     last_driver_phone TEXT DEFAULT '',
                     created_at BIGINT DEFAULT extract(epoch from now())
+                );""",
+                """CREATE TABLE IF NOT EXISTS qris_payment_credits (
+                    provider_message_id BIGINT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    created_at BIGINT DEFAULT extract(epoch from now())
                 );"""
             ]
             for q in queries:
@@ -103,6 +109,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS otp_orders (order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, token TEXT, phone TEXT, service_name TEXT, price INTEGER, status TEXT DEFAULT 'waiting', otp TEXT, msg_id INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')));
             CREATE TABLE IF NOT EXISTS voc_codes (code TEXT PRIMARY KEY, quota INTEGER NOT NULL, active INTEGER DEFAULT 1, created_by INTEGER, created_at INTEGER DEFAULT (strftime('%s','now')), used_by INTEGER, used_at INTEGER);
             CREATE TABLE IF NOT EXISTS sfood_orders (order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, code TEXT DEFAULT '', label TEXT DEFAULT '', last_status INTEGER DEFAULT 0, last_status_text TEXT DEFAULT '', last_eta TEXT DEFAULT '', last_driver TEXT DEFAULT '', last_driver_phone TEXT DEFAULT '', created_at INTEGER DEFAULT (strftime('%s','now')));
+            CREATE TABLE IF NOT EXISTS qris_payment_credits (provider_message_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, amount INTEGER NOT NULL, created_at INTEGER DEFAULT (strftime('%s','now')));
             """)
             otp_columns = {row[1] for row in conn.execute("PRAGMA table_info(otp_orders)").fetchall()}
             if "otp_history" not in otp_columns:
@@ -257,6 +264,55 @@ def add_saldo(user_id, amount, desc=""):
             ctx.execute("INSERT INTO transactions(user_id,type,amount,description) VALUES(?,?,?,?)", (user_id, 'IN', amount, desc))
             ctx.commit()
             return True
+
+
+def add_qris_saldo_once(user_id, amount, provider_message_id, desc=""):
+    """Credit one provider success message at most once, atomically."""
+    if amount <= 0 or provider_message_id is None:
+        return False
+    provider_message_id = int(provider_message_id)
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                "INSERT INTO qris_payment_credits(provider_message_id,user_id,amount) "
+                "VALUES(%s,%s,%s) ON CONFLICT (provider_message_id) DO NOTHING "
+                "RETURNING provider_message_id",
+                (provider_message_id, user_id, amount),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur.execute("UPDATE users SET saldo=saldo+%s WHERE user_id=%s", (amount, user_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(f"User {user_id} tidak ditemukan saat kredit QRIS")
+            cur.execute(
+                "INSERT INTO transactions(user_id,type,amount,description) VALUES(%s,%s,%s,%s)",
+                (user_id, "IN", amount, desc),
+            )
+            return True
+
+        ctx.execute("BEGIN IMMEDIATE")
+        try:
+            cur = ctx.execute(
+                "INSERT OR IGNORE INTO qris_payment_credits(provider_message_id,user_id,amount) "
+                "VALUES(?,?,?)",
+                (provider_message_id, user_id, amount),
+            )
+            if cur.rowcount != 1:
+                ctx.rollback()
+                return False
+            cur = ctx.execute("UPDATE users SET saldo=saldo+? WHERE user_id=?", (amount, user_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(f"User {user_id} tidak ditemukan saat kredit QRIS")
+            ctx.execute(
+                "INSERT INTO transactions(user_id,type,amount,description) VALUES(?,?,?,?)",
+                (user_id, "IN", amount, desc),
+            )
+            ctx.commit()
+            return True
+        except Exception:
+            ctx.rollback()
+            raise
 
 def deduct_saldo(user_id, amount, desc=""):
     if amount <= 0: return False

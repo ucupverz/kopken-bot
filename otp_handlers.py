@@ -947,15 +947,53 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False,
     
     async def bg_wait_and_process():
         try:
-            is_paid_status = await asyncio.wait_for(
+            payment_result = await asyncio.wait_for(
                 dehuyz_automation.wait_for_payment(amount, qris_msg_id), timeout=330
             )
+            if isinstance(payment_result, tuple) and len(payment_result) == 2:
+                is_paid_status, provider_payment_id = payment_result
+            else:
+                is_paid_status, provider_payment_id = payment_result, None
+            if is_paid_status == "success" and provider_payment_id is None and not is_direct_buy:
+                logger.error("QRIS success has no provider message ID for chat %s", chat_id)
+                is_paid_status = "error"
         except asyncio.TimeoutError:
             is_paid_status = "timeout"
+            provider_payment_id = None
         except Exception:
             logger.exception("QRIS payment status check failed for chat %s", chat_id)
             is_paid_status = "error"
+            provider_payment_id = None
         if is_paid_status == "success":
+            if not is_direct_buy:
+                try:
+                    credited = db.add_qris_saldo_once(
+                        chat_id, amount, provider_payment_id,
+                        f"Topup QRIS Rp {amount:,}",
+                    )
+                except Exception:
+                    logger.exception("QRIS payment confirmed but balance credit failed for chat %s", chat_id)
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=chat_id, message_id=qris_msg.message_id,
+                            caption="⚠️ Pembayaran terdeteksi, tetapi pencatatan saldo gagal. Hubungi admin dan jangan bayar ulang.",
+                            parse_mode=ParseMode.HTML, reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                    return
+                if not credited:
+                    logger.warning("Ignoring duplicate QRIS success message %s", provider_payment_id)
+                    try:
+                        await bot.edit_message_caption(
+                            chat_id=chat_id, message_id=qris_msg.message_id,
+                            caption="ℹ️ Notifikasi pembayaran ini sudah diproses sebelumnya. Saldo tidak dikreditkan dua kali.",
+                            parse_mode=ParseMode.HTML, reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                    return
+
             try:
                 await bot.edit_message_caption(chat_id=chat_id, message_id=qris_msg.message_id, caption=f"✅ <b>Topup Rp{amount:,} berhasil, balance sudah masuk.</b>", parse_mode=ParseMode.HTML, reply_markup=None)
             except Exception: pass
@@ -995,7 +1033,6 @@ async def process_qris_payment(bot, chat_id, amount, ctx, is_direct_buy=False,
                     await bot.send_message(chat_id, f"❌ Gagal menyewa nomor setelah bayar.\n<b>Alasan:</b> <code>{err_msg}</code>\n\nBalance Rp {amount:,} dikembalikan.", parse_mode=ParseMode.HTML)
                 
             else:
-                db.add_saldo(chat_id, amount, f"Topup QRIS Rp {amount:,}")
                 u = db.get_user(chat_id)
                 kb = await get_otp_keyboard() if db.has_whatsapp_access(chat_id) else get_menu_keyboard()
                 await bot.send_message(chat_id, f"✅ Deposit Berhasil! Balance masuk Rp {amount:,}.\nTotal Balance: Rp {u['saldo']:,}", reply_markup=kb)
