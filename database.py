@@ -214,6 +214,23 @@ def sfood_stop_all_user(user_id):
         )
         return cur.rowcount
 
+def sfood_update_order_state(order_id, status, status_text, eta, driver, driver_phone):
+    values = (status, status_text or '', eta or '', driver or '', driver_phone or '', str(order_id))
+    with get_conn() as ctx:
+        if DATABASE_URL:
+            conn, cur = ctx
+            cur.execute(
+                """UPDATE sfood_orders SET last_status=%s, last_status_text=%s, last_eta=%s,
+                   last_driver=%s, last_driver_phone=%s WHERE order_id=%s AND last_status<>600""",
+                values,
+            )
+        else:
+            ctx.execute(
+                """UPDATE sfood_orders SET last_status=?, last_status_text=?, last_eta=?,
+                   last_driver=?, last_driver_phone=? WHERE order_id=? AND last_status<>600""",
+                values,
+            )
+
 def sfood_mark_order_finished(order_id):
     with get_conn() as ctx:
         if DATABASE_URL:
