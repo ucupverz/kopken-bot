@@ -18,6 +18,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().
 
 _near_alerted = set()
 _chat_cursor = {}
+_chat_retry_at = {}
 _last_admin_alert = 0.0
 
 
@@ -111,10 +112,17 @@ async def _check_near(bot, order, parsed):
 
 async def _poll_chat(bot, order, parsed):
     """Teruskan pesan kurir (shptools) ke Telegram."""
-    if (order["code"] or "") != "shptools":
-        return
     oid = order["order_id"]
-    if not await sfood_shptools.chat_open(oid, parsed.get("driver_id", "")):
+    if time.time() < _chat_retry_at.get(oid, 0):
+        return
+    driver_id = parsed.get("driver_id", "")
+    if not driver_id:
+        # Order dari link shopeefood.co.id: ambil driver id lewat shptools (order_id sama)
+        detail = await sfood_shptools.fetch_order_detail(oid)
+        driver_id = str(((detail or {}).get("driver") or {}).get("id") or "")
+    if not await sfood_shptools.chat_open(oid, driver_id):
+        # Kurir belum ada / order tidak ada di akun shptools: coba lagi 2 menit lagi
+        _chat_retry_at[oid] = time.time() + 120
         return
     after = _chat_cursor.get(oid, "0")
     messages = await sfood_shptools.chat_fetch(oid, after)
@@ -198,6 +206,7 @@ async def tracker_worker(bot):
                     db.sfood_mark_order_finished(order["order_id"])
                     _near_alerted.discard(order["order_id"])
                     _chat_cursor.pop(order["order_id"], None)
+                    _chat_retry_at.pop(order["order_id"], None)
                     print(f"[SFOOD] Pesanan {order['order_id']} selesai & dihapus dari antrean.")
                 else:
                     db.sfood_update_order_state(

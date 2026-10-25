@@ -19,7 +19,10 @@ ORDER_ID_RE = re.compile(r"Order ID: (\d+)")
 
 
 def _active_shptools_orders(user_id):
-    return [o for o in db.sfood_get_orders_by_user(user_id) if (o["code"] or "") == "shptools"]
+    """Semua order aktif user. Chat lewat API shptools memakai order_id yang sama,
+    jadi berlaku juga untuk order yang dilacak dari link shopeefood.co.id
+    (selama order itu ada di akun shptools yang dipakai bot)."""
+    return list(db.sfood_get_orders_by_user(user_id))
 
 
 async def _send(update: Update, order_id: str, text: str):
@@ -29,7 +32,9 @@ async def _send(update: Update, order_id: str, text: str):
             f"✅ Terkirim ke kurir (order <code>{order_id}</code>)", parse_mode=ParseMode.HTML
         )
     else:
-        await update.message.reply_text("❌ Gagal kirim chat ke kurir. Coba lagi sebentar.")
+        await update.message.reply_text("❌ Gagal kirim chat ke kurir.\n"
+            "Kemungkinan: kurir belum ter-assign, order tidak ada di akun shptools bot, "
+            "atau login shptools bot habis.")
 
 
 async def cmd_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -47,7 +52,7 @@ async def cmd_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     orders = _active_shptools_orders(user.id)
     if not orders:
-        await update.message.reply_text("❌ Tidak ada order shptools aktif. Chat hanya untuk link shptools.")
+        await update.message.reply_text("❌ Tidak ada order aktif.")
         return
 
     order_id = None
