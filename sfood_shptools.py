@@ -16,6 +16,8 @@ SHPTOOLS_USERID = os.getenv("SHPTOOLS_USERID", "")
 
 # True kalau request terakhir ke shptools ditolak karena auth (cookie web_auth habis/salah).
 AUTH_FAILED = False
+# Alasan kegagalan request shptools terakhir (untuk diagnosa).
+LAST_ERROR = ""
 
 
 STATUS_MAP = {
@@ -78,28 +80,7 @@ def _get_headers():
 
 async def fetch_order_detail(order_id: str):
     """Hit shptools API untuk detail order."""
-    url = f"{SHPTOOLS_BASE}/order-detail"
-    payload = {"id": order_id}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(url, headers=_get_headers(), json=payload)
-            global AUTH_FAILED
-            if r.status_code in (401, 403):
-                AUTH_FAILED = True
-                print(f"[SHPTOOLS] ⚠️ Auth ditolak HTTP {r.status_code} (cek SHPTOOLS_WEB_AUTH)")
-                return None
-            if r.status_code != 200:
-                print(f"[SHPTOOLS] ⚠️ HTTP {r.status_code}")
-                return None
-            AUTH_FAILED = False
-            data = r.json()
-            if not data.get("success"):
-                print(f"[SHPTOOLS] ⚠️ API error")
-                return None
-            return data.get("data")
-    except Exception as e:
-        print(f"[SHPTOOLS] ❌ Fetch error: {e}")
-        return None
+    return await _post_api("order-detail", {"id": order_id}) or None
 
 
 async def fetch_driver_location(order_id: str):
@@ -204,26 +185,37 @@ _chat_opened = set()
 
 
 async def _post_api(endpoint: str, payload: dict):
-    """POST generik ke shptools. Return field `data` kalau sukses, None kalau gagal."""
-    global AUTH_FAILED
+    """POST generik ke shptools. Return field `data` kalau sukses, None kalau gagal.
+    Alasan gagal disimpan di LAST_ERROR."""
+    global AUTH_FAILED, LAST_ERROR
+    if not WEB_AUTH_COOKIE:
+        LAST_ERROR = "env SHPTOOLS_WEB_AUTH kosong"
+        print(f"[SHPTOOLS] ⚠️ {LAST_ERROR}")
+        return None
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(f"{SHPTOOLS_BASE}/{endpoint}", headers=_get_headers(), json=payload)
+            snippet = (r.text or "")[:150].replace("\n", " ")
             if r.status_code in (401, 403):
                 AUTH_FAILED = True
-                print(f"[SHPTOOLS] ⚠️ Auth ditolak di {endpoint} (HTTP {r.status_code})")
+                LAST_ERROR = f"{endpoint}: auth ditolak HTTP {r.status_code} (cookie habis/salah)"
+                print(f"[SHPTOOLS] ⚠️ {LAST_ERROR} {snippet}")
                 return None
             if r.status_code != 200:
-                print(f"[SHPTOOLS] ⚠️ {endpoint} HTTP {r.status_code}")
+                LAST_ERROR = f"{endpoint}: HTTP {r.status_code} {snippet}"
+                print(f"[SHPTOOLS] ⚠️ {LAST_ERROR}")
                 return None
             AUTH_FAILED = False
             data = r.json()
             if not data.get("success"):
-                print(f"[SHPTOOLS] ⚠️ {endpoint} API error")
+                LAST_ERROR = f"{endpoint}: success=false {snippet}"
+                print(f"[SHPTOOLS] ⚠️ {LAST_ERROR}")
                 return None
+            LAST_ERROR = ""
             return data.get("data") if data.get("data") is not None else {}
     except Exception as e:
-        print(f"[SHPTOOLS] ❌ {endpoint} error: {e}")
+        LAST_ERROR = f"{endpoint}: {type(e).__name__}: {e}"
+        print(f"[SHPTOOLS] ❌ {LAST_ERROR}")
         return None
 
 
@@ -253,6 +245,10 @@ async def chat_send(order_id: str, text: str):
     if order_id not in _chat_opened:
         detail = await fetch_order_detail(order_id)
         driver_id = str(((detail or {}).get("driver") or {}).get("id") or "")
+        if detail and not driver_id:
+            global LAST_ERROR
+            LAST_ERROR = "kurir belum ter-assign (driver.id kosong)"
+            return False
         if not await chat_open(order_id, driver_id):
             return False
     data = await _post_api("chat-send", {"orderId": str(order_id), "text": text})

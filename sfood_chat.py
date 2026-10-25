@@ -12,8 +12,13 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
+import os
+
 import database as db
+import sfood_shptools
 from sfood_shptools import chat_send
+
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
 ORDER_ID_RE = re.compile(r"Order ID: (\d+)")
 
@@ -32,9 +37,14 @@ async def _send(update: Update, order_id: str, text: str):
             f"✅ Terkirim ke kurir (order <code>{order_id}</code>)", parse_mode=ParseMode.HTML
         )
     else:
-        await update.message.reply_text("❌ Gagal kirim chat ke kurir.\n"
+        text = (
+            "❌ Gagal kirim chat ke kurir.\n"
             "Kemungkinan: kurir belum ter-assign, order tidak ada di akun shptools bot, "
-            "atau login shptools bot habis.")
+            "atau login shptools bot habis."
+        )
+        if update.effective_user.id in ADMIN_IDS and sfood_shptools.LAST_ERROR:
+            text += f"\n\nDetail (admin): {sfood_shptools.LAST_ERROR}"
+        await update.message.reply_text(text)
 
 
 async def cmd_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
