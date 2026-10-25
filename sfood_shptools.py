@@ -14,6 +14,9 @@ SHPTOOLS_BASE = "https://shptools.my.id/api/sfood"
 WEB_AUTH_COOKIE = os.getenv("SHPTOOLS_WEB_AUTH", "")
 SHPTOOLS_USERID = os.getenv("SHPTOOLS_USERID", "")
 
+# True kalau request terakhir ke shptools ditolak karena auth (cookie web_auth habis/salah).
+AUTH_FAILED = False
+
 
 STATUS_MAP = {
     100: "Order baru masuk",
@@ -80,9 +83,15 @@ async def fetch_order_detail(order_id: str):
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(url, headers=_get_headers(), json=payload)
+            global AUTH_FAILED
+            if r.status_code in (401, 403):
+                AUTH_FAILED = True
+                print(f"[SHPTOOLS] ⚠️ Auth ditolak HTTP {r.status_code} (cek SHPTOOLS_WEB_AUTH)")
+                return None
             if r.status_code != 200:
                 print(f"[SHPTOOLS] ⚠️ HTTP {r.status_code}")
                 return None
+            AUTH_FAILED = False
             data = r.json()
             if not data.get("success"):
                 print(f"[SHPTOOLS] ⚠️ API error")
