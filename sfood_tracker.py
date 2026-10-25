@@ -17,6 +17,7 @@ ADMIN_ALERT_INTERVAL = 3600
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
 _near_alerted = set()
+_chat_cursor = {}
 _last_admin_alert = 0.0
 
 
@@ -108,6 +109,43 @@ async def _check_near(bot, order, parsed):
         print(f"[SFOOD] ❌ Gagal kirim alert dekat: {e}")
 
 
+async def _poll_chat(bot, order, parsed):
+    """Teruskan pesan kurir (shptools) ke Telegram."""
+    if (order["code"] or "") != "shptools":
+        return
+    oid = order["order_id"]
+    if not await sfood_shptools.chat_open(oid, parsed.get("driver_id", "")):
+        return
+    after = _chat_cursor.get(oid, "0")
+    messages = await sfood_shptools.chat_fetch(oid, after)
+    if not messages:
+        return
+    for m in messages:
+        mid = str(m.get("id") or "")
+        if mid:
+            _chat_cursor[oid] = mid
+        if m.get("from") != "driver":
+            continue
+        if m.get("type") == "text":
+            body = escape(str(m.get("text") or ""))
+        else:
+            link = m.get("url") or m.get("thumb") or ""
+            body = f"[{escape(str(m.get('type') or 'media'))}] {escape(str(link))}"
+        try:
+            await bot.send_message(
+                chat_id=order["user_id"],
+                text=(
+                    f"💬 <b>PESAN KURIR</b> ({escape(str(parsed['driver_name']))})\n\n"
+                    f"{body}\n\n"
+                    f"<i>Reply pesan ini untuk membalas.</i>\n"
+                    f"Order ID: <code>{oid}</code>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            print(f"[SFOOD] ❌ Gagal teruskan chat: {e}")
+
+
 async def _alert_admin_if_auth_failed(bot):
     global _last_admin_alert
     if not sfood_shptools.AUTH_FAILED:
@@ -159,6 +197,7 @@ async def tracker_worker(bot):
                 if finished or cancelled:
                     db.sfood_mark_order_finished(order["order_id"])
                     _near_alerted.discard(order["order_id"])
+                    _chat_cursor.pop(order["order_id"], None)
                     print(f"[SFOOD] Pesanan {order['order_id']} selesai & dihapus dari antrean.")
                 else:
                     db.sfood_update_order_state(
@@ -166,6 +205,7 @@ async def tracker_worker(bot):
                         parsed["eta_text"], parsed["driver_name"], parsed["driver_phone"],
                     )
                     await _check_near(bot, order, parsed)
+                    await _poll_chat(bot, order, parsed)
 
             await _alert_admin_if_auth_failed(bot)
             await asyncio.sleep(POLL_INTERVAL)

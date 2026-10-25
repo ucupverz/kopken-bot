@@ -31,6 +31,7 @@ from sfood_handlers import (
     handle_sfood_stop_message, cmd_sfood_stopall, handle_sfood_message
 )
 from sfood_tracker import tracker_worker
+from sfood_chat import cmd_chat, handle_chat_reply
 from sfood_admin_handlers import (
     cmd_sfood_users, cmd_sfood_leaderboard, cmd_sfood_userinfo
 )
@@ -560,6 +561,7 @@ def main():
     bot_app.add_handler(CommandHandler("sfood_list", cmd_sfood_list))
     bot_app.add_handler(CommandHandler("sfood_stop", cmd_sfood_stop))
     bot_app.add_handler(CommandHandler("sfood_stopall", cmd_sfood_stopall))
+    bot_app.add_handler(CommandHandler("chat", cmd_chat))
     bot_app.add_handler(CommandHandler("sfood_users", cmd_sfood_users))
     bot_app.add_handler(CommandHandler("sfood_leaderboard", cmd_sfood_leaderboard))
     bot_app.add_handler(CommandHandler("sfood_userinfo", cmd_sfood_userinfo))
@@ -592,6 +594,10 @@ def main():
     bot_app.add_handler(CallbackQueryHandler(handle_buy_callback, pattern=r"^otp_buy_"))
     bot_app.add_handler(CallbackQueryHandler(handle_history_callback, pattern=r"^otp_history$"))
     
+    bot_app.add_handler(
+        MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handle_chat_reply),
+        group=-1,
+    )
     bot_app.add_handler(MessageHandler(filters.LOCATION, handle_live_location))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_error_handler(error_handler)

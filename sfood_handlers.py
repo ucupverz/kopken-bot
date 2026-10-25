@@ -86,6 +86,7 @@ async def cmd_sfood(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/sfood_list — List order aktif\n"
         "/sfood_stop &lt;order_id&gt; — Stop 1 order\n"
         "/sfood_stopall — Stop semua order\n"
+        "/chat &lt;pesan&gt; — Chat ke kurir (link shptools)\n"
         "/telemetry — Menu Pantau Kurir"
     )
     await update.message.reply_text(

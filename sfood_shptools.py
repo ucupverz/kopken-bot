@@ -134,6 +134,7 @@ def parse_shptools_response(order_data: dict, driver_data: dict = None):
     driver_phone = driver.get("phone") or "-"
     driver_plate = driver.get("plate") or "-"
     driver_rating = driver.get("rating") or "-"
+    driver_id = str(driver.get("id") or "")
 
     eta_min_ms = order_data.get("etaMinMs", 0)
     eta_max_ms = order_data.get("etaMaxMs", 0)
@@ -176,6 +177,7 @@ def parse_shptools_response(order_data: dict, driver_data: dict = None):
         "driver_phone": driver_phone,
         "driver_plate": driver_plate,
         "driver_rating": driver_rating,
+        "driver_id": driver_id,
         "delivery_status": 0,
         "enroute_status": 0,
         "store_name": store_name,
@@ -193,3 +195,65 @@ def parse_shptools_response(order_data: dict, driver_data: dict = None):
         "deliv_lng": deliv_lng,
         "_source": "shptools",
     }
+
+# ======================================================================
+# CHAT DENGAN KURIR
+# ======================================================================
+
+_chat_opened = set()
+
+
+async def _post_api(endpoint: str, payload: dict):
+    """POST generik ke shptools. Return field `data` kalau sukses, None kalau gagal."""
+    global AUTH_FAILED
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(f"{SHPTOOLS_BASE}/{endpoint}", headers=_get_headers(), json=payload)
+            if r.status_code in (401, 403):
+                AUTH_FAILED = True
+                print(f"[SHPTOOLS] ⚠️ Auth ditolak di {endpoint} (HTTP {r.status_code})")
+                return None
+            if r.status_code != 200:
+                print(f"[SHPTOOLS] ⚠️ {endpoint} HTTP {r.status_code}")
+                return None
+            AUTH_FAILED = False
+            data = r.json()
+            if not data.get("success"):
+                print(f"[SHPTOOLS] ⚠️ {endpoint} API error")
+                return None
+            return data.get("data") if data.get("data") is not None else {}
+    except Exception as e:
+        print(f"[SHPTOOLS] ❌ {endpoint} error: {e}")
+        return None
+
+
+async def chat_open(order_id: str, driver_id: str):
+    """Buka sesi chat (sekali per order per proses)."""
+    if order_id in _chat_opened:
+        return True
+    if not driver_id:
+        return False
+    data = await _post_api("chat-open", {"orderId": str(order_id), "driverId": str(driver_id)})
+    if data is None:
+        return False
+    _chat_opened.add(order_id)
+    return True
+
+
+async def chat_fetch(order_id: str, after_id: str = "0"):
+    """Ambil pesan chat setelah after_id. Return list pesan atau None kalau gagal."""
+    data = await _post_api("chat-messages", {"orderId": str(order_id), "afterId": str(after_id), "wait": False})
+    if data is None:
+        return None
+    return data.get("messages") or []
+
+
+async def chat_send(order_id: str, text: str):
+    """Kirim pesan ke kurir. Otomatis chat-open dulu. Return True kalau sukses."""
+    if order_id not in _chat_opened:
+        detail = await fetch_order_detail(order_id)
+        driver_id = str(((detail or {}).get("driver") or {}).get("id") or "")
+        if not await chat_open(order_id, driver_id):
+            return False
+    data = await _post_api("chat-send", {"orderId": str(order_id), "text": text})
+    return data is not None
